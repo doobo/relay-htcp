@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0f1117">
+<title>relay-htcp 管理面板</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script>
+  /* Applied before first paint so the page never flashes the wrong palette.
+     Keep the storage key in sync with app.js. */
+  (function () {
+    try {
+      var choice = localStorage.getItem("relay-htcp.theme") || "auto";
+      var theme = choice === "auto"
+        ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+        : choice;
+      var root = document.documentElement;
+      root.setAttribute("data-theme", theme);
+      root.setAttribute("data-theme-choice", choice);
+      root.style.colorScheme = theme === "light" ? "light" : "dark";
+    } catch (e) { /* storage unavailable: keep the dark palette */ }
+  })();
+</script>
+</head>
+<body>
+
+<div id="login-view" class="login-view">
+  <select class="theme-select" data-theme-select aria-label="主题" title="外观">
+    <option value="auto">跟随系统</option>
+    <option value="dark">深色</option>
+    <option value="light">浅色</option>
+    <option value="black">纯黑</option>
+  </select>
+  <form id="login-form" class="login-card">
+    <div class="login-brand">
+      <img class="brand-mark" src="favicon.svg" alt="" aria-hidden="true">
+      <h1>relay-htcp</h1>
+    </div>
+    <p class="login-subtitle">登录以管理隧道、路由与配置。</p>
+    <input id="login-user" autocomplete="username" placeholder="用户名" required>
+    <input id="login-pass" type="password" autocomplete="current-password" placeholder="密码" required>
+    <button type="submit" id="login-btn">登 录</button>
+    <p id="login-error" class="login-notice" role="status"></p>
+  </form>
+</div>
+
+<div id="app-view" class="hidden">
+  <header class="app-header">
+    <div class="brand">
+      <img class="brand-mark" src="favicon.svg" alt="" aria-hidden="true">
+      <h1>relay-htcp <span id="role-badge" class="badge"></span></h1>
+    </div>
+    <nav class="tabs" aria-label="页面">
+      <button class="tab active" data-tab="status">状态</button>
+      <button class="tab" data-tab="config">配置</button>
+      <button class="tab" data-tab="users" id="users-tab">用户</button>
+    </nav>
+    <div class="header-actions">
+      <select class="theme-select" data-theme-select aria-label="主题" title="外观">
+        <option value="auto">跟随系统</option>
+        <option value="dark">深色</option>
+        <option value="light">浅色</option>
+        <option value="black">纯黑</option>
+      </select>
+      <span id="whoami" class="muted"></span>
+      <button id="logout-btn" class="secondary small">退出</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="tab-status">
+      <div id="summary" class="cards"></div>
+      <h2>实时连接</h2>
+      <div id="live"></div>
+    </section>
+
+    <section id="tab-config" class="hidden">
+      <div class="config-bar">
+        <span class="muted">配置来源:<span id="cfg-source"></span></span>
+        <div class="config-actions">
+          <button id="cfg-mode-form" class="secondary small active" type="button">表单</button>
+          <button id="cfg-mode-yaml" class="secondary small" type="button">YAML</button>
+          <button id="cfg-reload" class="secondary small" type="button">重新加载</button>
+          <button id="cfg-save" type="button">保存配置</button>
+        </div>
+      </div>
+      <pre id="cfg-result"></pre>
+      <div id="cfg-form" class="config-form"></div>
+      <textarea id="cfg-yaml" class="hidden" spellcheck="false"></textarea>
+    </section>
+
+    <section id="tab-users" class="hidden">
+      <div class="panel">
+        <h2>新建用户</h2>
+        <form id="user-form" class="row">
+          <input id="new-user" placeholder="用户名" required>
+          <input id="new-pass" type="text" placeholder="密码(至少 8 位)" required>
+          <select id="new-role">
+            <option value="admin">admin</option>
+            <option value="viewer">viewer</option>
+          </select>
+          <button type="submit">创建</button>
+        </form>
+        <pre id="user-result"></pre>
+        <div class="table-wrap">
+          <table id="users-table">
+            <thead>
+              <tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>最近登录</th><th>操作</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

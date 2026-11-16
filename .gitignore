@@ -1,0 +1,9 @@
+/relay-htcp
+/relay-htcp.exe
+/dist/
+*.key
+*.db
+*.db-wal
+*.db-shm
+Task.md
+.atomcode/

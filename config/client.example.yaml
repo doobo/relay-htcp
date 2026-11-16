@@ -1,0 +1,51 @@
+# relay-htcp client configuration
+
+# Server address (scheme://host[:port], no path). https = TLS, http = h2c.
+server: "https://tunnel.example.com:443"
+
+tls:
+  insecure_skip_verify: false   # true only for self-signed certificates
+  ca_file: ""                   # optional custom CA bundle (PEM)
+
+auth:
+  token: "change-me-please-0123456789"
+
+# Local ports mapped to server-side routes.
+listeners:
+  - local: "127.0.0.1:2222"
+    target: "ssh"
+  - local: "127.0.0.1:33060"
+    target: "mysql"
+
+tunnel:
+  connections: 2          # independent tunnel connections (pool)
+  heartbeat: 15s          # PING interval
+  heartbeat_miss: 3       # consecutive missed PONGs before reconnect
+  reconnect_min: 1s
+  reconnect_max: 30s
+  stream_timeout: 30s     # max wait for a live tunnel on accept
+
+# Browser-like request headers to camouflage tunnel traffic.
+disguise:
+  enabled: true
+  user_agent: ""          # empty = built-in Chrome UA
+
+log:
+  level: info
+
+# Embedded admin panel (user login + live status + config editing).
+# The client has no inbound tunnel port, so its panel always uses its own
+# listener. `path` is the URL prefix of the panel.
+# On first run a default user is created; with an empty default_password a
+# random initial password is printed to the log exactly once. Configs saved
+# from the panel live in the SQLite DB and win over this file on restart.
+admin:
+  enabled: false
+  path: "/admin"
+  listen: "127.0.0.1:8081"
+  db_path: "relay-htcp-admin.db"
+  key_file: "relay-htcp-admin.db.key"  # master key for at-rest encryption; auto-created 0600
+  default_username: "admin"
+  default_password: ""        # empty = generate and print once on first run
+  session_ttl: 24h
+  # token: ""                 # optional static bootstrap token for scripts
