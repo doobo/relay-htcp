@@ -8,6 +8,16 @@ tls:
   insecure_skip_verify: false   # true only for self-signed certificates
   ca_file: ""                   # optional custom CA bundle (PEM)
 
+# Optional outbound proxy used to reach the tunnel servers. Disabled by
+# default. HTTP proxies use CONNECT and therefore require https:// server URLs;
+# SOCKS5 works for both http:// (h2c) and https://.
+proxy:
+  enabled: false
+  type: http                    # http | socks5
+  address: "127.0.0.1:7890"     # host:port
+  username: ""
+  password: ""
+
 # One or more tunnel servers. Each server gets its own connection pool.
 servers:
   - name: primary

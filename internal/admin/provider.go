@@ -120,6 +120,7 @@ type StreamStat struct {
 type ClientStatus struct {
 	// ServerAddr is the first server URL, kept for older front-ends.
 	ServerAddr  string         `json:"server_addr"`
+	Proxy       string         `json:"proxy"`
 	Servers     []ServerStat   `json:"servers"`
 	Slots       []SlotStat     `json:"slots"`
 	Listeners   []ListenerStat `json:"listeners"`

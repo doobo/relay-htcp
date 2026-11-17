@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +43,7 @@ type ClientConfig struct {
 	TLS       ClientTLS        `yaml:"tls"`
 	Auth      ClientAuth       `yaml:"auth"`
 	Servers   []ServerEndpoint `yaml:"servers"`
+	Proxy     ClientProxy      `yaml:"proxy"`
 	Listeners []Listener       `yaml:"listeners"`
 	Tunnel    TunnelClient     `yaml:"tunnel"`
 	Disguise  ClientDisguise   `yaml:"disguise"`
@@ -59,6 +62,72 @@ type ClientTLS struct {
 // override it with their own token.
 type ClientAuth struct {
 	Token string `yaml:"token"`
+}
+
+// ClientProxy configures an optional outbound HTTP or SOCKS5 proxy used for
+// connections to tunnel servers. It is disabled by default.
+type ClientProxy struct {
+	Enabled  bool   `yaml:"enabled"`
+	Type     string `yaml:"type"`    // http | socks5
+	Address  string `yaml:"address"` // host:port
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// Proxy type names.
+const (
+	ProxyHTTP   = "http"
+	ProxySOCKS5 = "socks5"
+)
+
+// Normalize validates the proxy settings and accepts a URL in Address
+// (for example http://user:pass@127.0.0.1:7890) as a convenience.
+func (p *ClientProxy) Normalize() error {
+	p.Address = strings.TrimSpace(p.Address)
+	p.Type = strings.ToLower(strings.TrimSpace(p.Type))
+	p.Username = strings.TrimSpace(p.Username)
+	if !p.Enabled {
+		return nil
+	}
+	if p.Address == "" {
+		return fmt.Errorf("address is required when enabled")
+	}
+	if strings.Contains(p.Address, "://") {
+		u, err := url.Parse(p.Address)
+		if err != nil {
+			return fmt.Errorf("address: %w", err)
+		}
+		if p.Type == "" {
+			switch strings.ToLower(u.Scheme) {
+			case "socks5", "socks5h", "socks":
+				p.Type = ProxySOCKS5
+			case "http", "https":
+				p.Type = ProxyHTTP
+			}
+		}
+		p.Address = u.Host
+		if u.User != nil && p.Username == "" {
+			p.Username = u.User.Username()
+			if pass, ok := u.User.Password(); ok && p.Password == "" {
+				p.Password = pass
+			}
+		}
+	}
+	if p.Type == "" {
+		p.Type = ProxyHTTP
+	}
+	switch p.Type {
+	case ProxyHTTP, "https":
+		p.Type = ProxyHTTP
+	case ProxySOCKS5, "socks5h", "socks":
+		p.Type = ProxySOCKS5
+	default:
+		return fmt.Errorf("type: must be %s or %s, got %q", ProxyHTTP, ProxySOCKS5, p.Type)
+	}
+	if _, _, err := net.SplitHostPort(p.Address); err != nil {
+		return fmt.Errorf("address: must be host:port, got %q", p.Address)
+	}
+	return nil
 }
 
 // ServerEndpoint is one tunnel server the client can connect to.
@@ -191,6 +260,9 @@ func (c *ClientConfig) Validate() error {
 	}
 	if len(c.Listeners) == 0 && !c.Admin.Enabled {
 		return fmt.Errorf("listeners: at least one required")
+	}
+	if err := c.Proxy.Normalize(); err != nil {
+		return fmt.Errorf("proxy: %w", err)
 	}
 	seen := map[string]bool{}
 	for i := range c.Listeners {

@@ -10,11 +10,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	xproxy "golang.org/x/net/proxy"
 
 	"relay-htcp/internal/config"
 	"relay-htcp/internal/disguise"
@@ -153,7 +156,7 @@ func NewPool(cfg *config.ClientConfig, log *slog.Logger) (*Pool, error) {
 		srv := &serverState{name: rs.Name, url: rs.URL, token: rs.Token,
 			transport: rs.Transport, xhttpPath: rs.XHTTPPath}
 		for i := 0; i < cfg.Tunnel.Connections; i++ {
-			client, err := newSlotClient(rs.URL, rs.TLS)
+			client, err := newSlotClient(rs.URL, rs.TLS, cfg.Proxy)
 			if err != nil {
 				return nil, fmt.Errorf("server %s: %w", rs.Name, err)
 			}
@@ -596,7 +599,7 @@ func (p *Pool) heartbeat(ctx context.Context, server string, idx int, t *tunnel)
 // newSlotClient builds one HTTP/2-capable client for a server address. Each
 // slot gets its own transport so a server's pool spans N independent
 // TCP/TLS connections.
-func newSlotClient(serverURL string, tlsCfgIn config.ClientTLS) (*http.Client, error) {
+func newSlotClient(serverURL string, tlsCfgIn config.ClientTLS, proxyCfg config.ClientProxy) (*http.Client, error) {
 	base := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		MaxIdleConns:        8,
@@ -606,6 +609,33 @@ func newSlotClient(serverURL string, tlsCfgIn config.ClientTLS) (*http.Client, e
 			MaxReceiveBufferPerConnection: 1 << 20, // 1 MiB per connection
 			MaxReceiveBufferPerStream:     1 << 20, // 1 MiB per stream
 		},
+	}
+	if proxyCfg.Enabled {
+		switch proxyCfg.Type {
+		case config.ProxyHTTP:
+			u := &url.URL{Scheme: "http", Host: proxyCfg.Address}
+			if proxyCfg.Username != "" {
+				u.User = url.UserPassword(proxyCfg.Username, proxyCfg.Password)
+			}
+			base.Proxy = http.ProxyURL(u)
+		case config.ProxySOCKS5:
+			var auth *xproxy.Auth
+			if proxyCfg.Username != "" {
+				auth = &xproxy.Auth{User: proxyCfg.Username, Password: proxyCfg.Password}
+			}
+			dialer, err := xproxy.SOCKS5("tcp", proxyCfg.Address, auth, xproxy.Direct)
+			if err != nil {
+				return nil, fmt.Errorf("socks5 proxy %s: %w", proxyCfg.Address, err)
+			}
+			base.Proxy = nil // a SOCKS5 dialer replaces the HTTP proxy path
+			if cd, ok := dialer.(xproxy.ContextDialer); ok {
+				base.DialContext = cd.DialContext
+			} else {
+				base.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.Dial(network, addr)
+				}
+			}
+		}
 	}
 	if strings.HasPrefix(serverURL, "https://") {
 		tlsCfg := &tls.Config{

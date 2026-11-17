@@ -140,6 +140,46 @@ func TestClientTransportDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestClientProxyDefaultsAndValidation(t *testing.T) {
+	cfg := multiServerClient()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Proxy.Enabled {
+		t.Fatal("proxy enabled by default")
+	}
+
+	cfg.Proxy.Enabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "address") {
+		t.Fatalf("enabled proxy without address: %v", err)
+	}
+
+	cfg.Proxy = ClientProxy{
+		Enabled: true,
+		Address: "http://user:pass@127.0.0.1:7890",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Proxy.Type != ProxyHTTP || cfg.Proxy.Address != "127.0.0.1:7890" ||
+		cfg.Proxy.Username != "user" || cfg.Proxy.Password != "pass" {
+		t.Fatalf("normalized proxy = %+v", cfg.Proxy)
+	}
+
+	cfg.Proxy = ClientProxy{Enabled: true, Type: "socks5h", Address: "127.0.0.1:1080"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Proxy.Type != ProxySOCKS5 {
+		t.Fatalf("socks type = %q", cfg.Proxy.Type)
+	}
+
+	cfg.Proxy.Type = "ftp"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "type") {
+		t.Fatalf("invalid proxy type accepted: %v", err)
+	}
+}
+
 func TestClientRequiresTokenPerServerOrGlobal(t *testing.T) {
 	cfg := multiServerClient()
 	cfg.Auth.Token = ""

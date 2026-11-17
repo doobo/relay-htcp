@@ -408,6 +408,7 @@ async function pollStatus() {
     cards.push(card("服务端", servers.length
       ? servers.map((s) => s.name).join("、")
       : c.server_addr));
+    if (c.proxy) cards.push(card("出口代理", c.proxy, "ok"));
     const online = (c.slots || []).filter((s) => s.state === "connected").length;
     cards.push(card("连接池", online + " / " + (c.slots || []).length + " 就绪",
       online > 0 ? "ok" : "warn"));

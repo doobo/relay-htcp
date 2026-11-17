@@ -25,7 +25,11 @@ func (p *Pool) Role() string { return "client" }
 
 // Status implements admin.Provider.
 func (p *Pool) Status() admin.Status {
+	cfg := p.cfgGet()
 	st := admin.Status{Role: "client", Client: &admin.ClientStatus{}}
+	if cfg.Proxy.Enabled {
+		st.Client.Proxy = cfg.Proxy.Type + "://" + cfg.Proxy.Address
+	}
 	for _, srv := range p.servers {
 		if st.Client.ServerAddr == "" {
 			st.Client.ServerAddr = srv.url
@@ -120,6 +124,9 @@ func (p *Pool) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	if old.TLS != newCfg.TLS {
 		report.RestartRequired = append(report.RestartRequired, "tls")
 	}
+	if old.Proxy != newCfg.Proxy {
+		report.RestartRequired = append(report.RestartRequired, "proxy")
+	}
 	if old.Tunnel != newCfg.Tunnel {
 		report.RestartRequired = append(report.RestartRequired, "tunnel")
 	}
@@ -202,6 +209,19 @@ func (p *Pool) ConfigFormSchema() admin.FormSchema {
 					Help: "服务端未单独配置 CA 时使用；修改后需要重启"},
 				{Path: "tls.insecure_skip_verify", Label: "全局跳过证书校验（仅测试）", Type: admin.FormBool,
 					Help: "服务端勾选“跳过校验”或这里勾选都会跳过；修改后需要重启"},
+			},
+		},
+		{
+			Title: "代理",
+			Key:   "proxy",
+			Fields: []admin.FormField{
+				{Path: "proxy.enabled", Label: "启用出口代理", Type: admin.FormBool,
+					Help: "默认关闭。开启后连接服务端（包括 xhttp）都通过该代理；修改后需要重启"},
+				{Path: "proxy.type", Label: "代理类型", Type: admin.FormSelect, Options: []string{"http", "socks5"}},
+				{Path: "proxy.address", Label: "代理地址", Type: admin.FormText, Placeholder: "127.0.0.1:7890",
+					Help: "host:port。HTTP 代理用于 https:// 服务端；SOCKS5 同时支持 http:// 和 https://"},
+				{Path: "proxy.username", Label: "代理用户名（可选）", Type: admin.FormText},
+				{Path: "proxy.password", Label: "代理密码（可选）", Type: admin.FormSecret, Placeholder: "留空保持不变"},
 			},
 		},
 		{

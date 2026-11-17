@@ -20,6 +20,7 @@
 - **连接池**：客户端可建立多条独立隧道连接，新数据流轮询分配。
 - **多服务端与故障转移**：客户端可配置多个服务端；每个本地监听可选择一个或多个服务端，策略支持轮询（`round_robin`）和故障转移（`failover`，始终优先第一个，服务端不可用或数据流打不开时才用下一个）。
 - **CDN / Cloudflare 适配**：每个服务端可选 `transport: xhttp`，把双向流拆成“短上传 POST + 长下载 GET”，不依赖双向 HTTP/2 请求体，可穿过 Cloudflare 等七层代理；默认的 `http` 传输仍保留给直连或四层转发场景。
+- **出口代理**：客户端可用 HTTP 或 SOCKS5 代理连接服务端（含 xhttp），默认关闭；适合本机需要经代理访问外网的场景。
 - **认证与路由**：Bearer Token 认证；每个 Token 可绑定一个或多个路由（建议按最小权限分配）；路由名到内网地址的映射在服务端集中管理。
 - **心跳与自愈**：PING/PONG 保活，连续丢失 `heartbeat_miss` 次后自动重连；指数退避。
 - **TLS**：支持真实证书、自签证书、自定义 CA；ALPN 优先协商 `h2`。
@@ -334,6 +335,24 @@ Cloudflare 侧建议：
 
 Cloudflare 侧保持橙云即可，不需要 WebSocket；使用 cloudflared 时把源站指向隧道的监听端口。
 
+### 9. 出口代理（HTTP / SOCKS5，可选）
+
+如果客户端所在网络需要经过代理才能访问服务端，可启用出口代理：
+
+```yaml
+proxy:
+  enabled: true
+  type: socks5              # http | socks5
+  address: "127.0.0.1:7890"
+  username: ""              # 可选
+  password: ""              # 可选
+```
+
+- 默认 `enabled: false`，即直连；启用后隧道控制流、数据流和 xhttp 请求都走该代理。
+- `http` 代理通过 CONNECT 转发，适用于 `https://` 服务端；纯 h2c 的 `http://` 服务端请用 `socks5`。
+- 代理配置属于启动参数，面板保存后需要重启客户端；面板的“代理”页签可编辑，密码以掩码显示。
+- 该代理只影响客户端到服务端的连接，不影响本地监听端口和管理面板。
+
 ## 配置参考
 
 配置采用 YAML，启动时校验；未知字段会被忽略，必填项缺失会直接报错退出。`log.level` 省略时默认 `info`，只接受 `debug` / `info` / `warn` / `error`。每个客户端 Token 可以绑定一个或多个路由，建议按最小权限分配。
@@ -380,6 +399,11 @@ Cloudflare 侧保持橙云即可，不需要 WebSocket；使用 cloudflared 时�
 | `tls.insecure_skip_verify` | bool | `false` | 全局跳过证书校验，仅测试环境使用 |
 | `tls.ca_file` | string | 空 | 全局自定义 CA 证书（PEM） |
 | `auth.token` | string | 空 | 全局默认 Token；每个服务端也可单独配置 |
+| `proxy.enabled` | bool | `false` | 是否通过出口代理连接服务端；默认关闭，修改后需重启 |
+| `proxy.type` | string | `http` | `http` 或 `socks5`；HTTP 代理仅用于 `https://` 服务端，SOCKS5 同时支持 h2c 和 TLS |
+| `proxy.address` | string | 空 | 代理地址 `host:port`，也兼容 `http://user:pass@host:port` 写法 |
+| `proxy.username` | string | 空 | 代理认证用户名（可选） |
+| `proxy.password` | string | 空 | 代理认证密码（可选，面板中掩码显示） |
 | `listeners` | list | 必填* | 至少一个本地监听，`local` 不能重复。*`admin.enabled: true` 时可为空 |
 | `listeners[].local` | string | 必填 | 本地监听地址，如 `127.0.0.1:2222` |
 | `listeners[].target` | string | 必填 | 服务端路由名 |
@@ -513,7 +537,7 @@ Token 已从配置表单中拆出，避免在长表单里误操作。页面上�
 
 ### 表单化配置
 
-配置页默认按角色渲染结构化表单：服务端包含监听/TLS、隧道参数、内网路由（Token 已移到独立页）；客户端的配置页拆成“服务端 / 本地监听 / 隧道参数”三个子页签，服务端列表和本地监听分别编辑。服务端页可维护多个服务端及各自的 Token/CA，本地监听页为每个监听选择服务端并设置轮询或故障转移策略。表单由后端 schema 驱动（`Provider.ConfigFormSchema`），后续新增可调参数只需在 schema 中加一行，前端和 API 无需改动。
+配置页默认按角色渲染结构化表单：服务端包含监听/TLS、隧道参数、内网路由（Token 已移到独立页）；客户端的配置页拆成“服务端 / 本地监听 / 代理 / 隧道参数”四个子页签，服务端列表和本地监听分别编辑。服务端页可维护多个服务端及各自的 Token/CA，本地监听页为每个监听选择服务端并设置轮询或故障转移策略。表单由后端 schema 驱动（`Provider.ConfigFormSchema`），后续新增可调参数只需在 schema 中加一行，前端和 API 无需改动。
 
 密钥字段掩码规则：
 
@@ -557,7 +581,7 @@ KEK 来源（按优先级）：
 | 端 | 立即生效 | 需要重启 |
 |---|---|---|
 | 服务端 | `auth.tokens`、`routes`、`tunnel.dial_timeout`、`tunnel.idle_timeout`、`tunnel.max_connections`、`tunnel.xhttp_path`、`disguise.enabled` | `listen`、`tls`、`tunnel.max_concurrent_streams`、`log.level` |
-| 客户端 | `listeners`（新增/删除/改目标/改服务端选择） | `servers`、`auth.token`、`tls`、`tunnel.*`、`log.level` |
+| 客户端 | `listeners`（新增/删除/改目标/改服务端选择） | `servers`、`auth.token`、`tls`、`proxy`、`tunnel.*`、`log.level` |
 
 客户端删除或改目标监听器时，已建立的连接会继续跑到结束，不会被强行中断。
 
@@ -663,6 +687,7 @@ go test ./...
 - 客户端连接池、监听器热增删、配置热应用
 - 端到端明文 h2c、TLS、断线重连
 - xhttp 传输：h2c、TLS，以及经过 HTTP/1.1 流式反代（模拟 CDN）的端到端回显
+- 客户端出口代理：HTTP CONNECT 与 SOCKS5 的端到端回显，默认关闭
 - 管理后台登录、限流、会话、用户 CRUD、配置保存、角色权限
 - 加密登录：WebCrypto 与 NaCl 两种载荷、nonce 单次使用、过期拒绝、前缀挂载与 IP 白名单
 - 表单化配置：schema 路径校验、secret 掩码、留空保持原值、类型转换
