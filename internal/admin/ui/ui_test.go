@@ -11,7 +11,7 @@ import (
 func TestHandlerServesAssets(t *testing.T) {
 	h := Handler()
 	for path, want := range map[string]string{
-		"/":                    "relay-htcp",
+		"/":                    "Relay-Htcp",
 		"/app.js":              "encryptWithWebCrypto",
 		"/style.css":           "--bg",
 		"/favicon.svg":         "<svg",
@@ -30,6 +30,9 @@ func TestHandlerServesAssets(t *testing.T) {
 	}
 	if !strings.Contains(string(mustRead(t, h, "/")), "data-theme-select") {
 		t.Fatal("index.html is missing the theme picker")
+	}
+	if !strings.Contains(string(mustRead(t, h, "/")), "restart-btn") {
+		t.Fatal("index.html is missing the restart button")
 	}
 }
 

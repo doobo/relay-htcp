@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -38,8 +40,14 @@ func (t TLSConfig) Enabled() bool { return t.Cert != "" && t.Key != "" }
 type Token struct {
 	Name   string   `yaml:"name"`
 	Token  string   `yaml:"token"`
-	Routes []string `yaml:"routes,omitempty"` // empty means all routes are allowed
+	Routes []string `yaml:"routes,omitempty"` // zero or more routes; empty means all
+	// Enabled defaults to true. A disabled token is kept in the config but
+	// never authenticates.
+	Enabled *bool `yaml:"enabled,omitempty"`
 }
+
+// On reports whether the token may authenticate (default true).
+func (t Token) On() bool { return t.Enabled == nil || *t.Enabled }
 
 // AuthConfig holds all accepted tokens.
 type AuthConfig struct {
@@ -58,6 +66,10 @@ type TunnelServer struct {
 	MaxConnections       int           `yaml:"max_connections"`
 	DialTimeout          time.Duration `yaml:"dial_timeout"`
 	IdleTimeout          time.Duration `yaml:"idle_timeout"`
+	// XHTTPPath is the URL prefix for the xhttp transport endpoints.
+	// Defaults to /relay; change it when another service already owns that
+	// prefix on the same domain.
+	XHTTPPath string `yaml:"xhttp_path"`
 }
 
 // DisguiseConfig toggles camouflage behaviour. Enabled defaults to true.
@@ -89,11 +101,15 @@ func LoadServer(path string) (*ServerConfig, error) {
 	return &cfg, nil
 }
 
+// DefaultListen is the tunnel listen address used when the config omits
+// `listen`. It can be overridden with the server's -listen / -port flags.
+const DefaultListen = ":5630"
+
 // Validate checks the configuration, applies defaults and fills derived
 // state.
 func (c *ServerConfig) Validate() error {
 	if c.Listen == "" {
-		return fmt.Errorf("listen: required")
+		c.Listen = DefaultListen
 	}
 	if len(c.Auth.Tokens) == 0 {
 		return fmt.Errorf("auth.tokens: at least one token required")
@@ -123,6 +139,14 @@ func (c *ServerConfig) Validate() error {
 		seenRoutes[r.Name] = true
 		c.routeTable[r.Name] = r.Target
 	}
+	// Each route referenced by a token must exist.
+	for _, t := range c.Auth.Tokens {
+		for _, name := range t.Routes {
+			if !seenRoutes[name] {
+				return fmt.Errorf("auth.tokens: token %q references unknown route %q", t.Name, name)
+			}
+		}
+	}
 	if c.Tunnel.MaxConcurrentStreams <= 0 {
 		c.Tunnel.MaxConcurrentStreams = 128
 	}
@@ -132,8 +156,18 @@ func (c *ServerConfig) Validate() error {
 	if c.Tunnel.IdleTimeout <= 0 {
 		c.Tunnel.IdleTimeout = 90 * time.Second
 	}
+	xhttpPath, err := NormalizeXHTTPPath(c.Tunnel.XHTTPPath)
+	if err != nil {
+		return fmt.Errorf("tunnel.xhttp_path: %w", err)
+	}
+	c.Tunnel.XHTTPPath = xhttpPath
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
+	}
+	switch c.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log.level: must be debug, info, warn or error, got %q", c.Log.Level)
 	}
 	if c.Disguise.Enabled == nil {
 		c.Disguise.Enabled = boolPtr(true)
@@ -153,6 +187,60 @@ func (c *ServerConfig) Validate() error {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// BootstrapServer builds a minimal, valid configuration used when the server
+// starts without a config file. The admin panel is enabled on the tunnel port
+// (path /admin), the database defaults to data/admin.db, and a disabled
+// placeholder Token plus a placeholder route keep the config valid until the
+// operator edits them in the panel.
+func BootstrapServer() (*ServerConfig, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("bootstrap token: %w", err)
+	}
+	off := false
+	cfg := &ServerConfig{
+		Listen: DefaultListen,
+		Auth: AuthConfig{Tokens: []Token{{
+			Name:    "bootstrap-placeholder",
+			Token:   hex.EncodeToString(buf),
+			Routes:  []string{"default"},
+			Enabled: &off,
+		}}},
+		Routes: []Route{{Name: "default", Target: "127.0.0.1:22"}},
+	}
+	cfg.Admin.Enabled = true
+	cfg.Admin.Shared = true
+	cfg.Admin.Path = "/admin"
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// DefaultXHTTPPath is the default prefix for the xhttp transport endpoints.
+// /relay is used instead of the common /xhttp so an existing Xray inbound can
+// keep its own /xhttp namespace on the same domain.
+const DefaultXHTTPPath = "/relay"
+
+// NormalizeXHTTPPath validates and normalizes a path prefix such as /relay.
+func NormalizeXHTTPPath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return DefaultXHTTPPath, nil
+	}
+	if strings.ContainsAny(p, "?#") {
+		return "", fmt.Errorf("must not contain a query or fragment, got %q", p)
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		return DefaultXHTTPPath, nil
+	}
+	return p, nil
+}
 
 // RouteTarget returns the local target for a route name.
 func (c *ServerConfig) RouteTarget(name string) (string, bool) {

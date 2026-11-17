@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0f1117">
-<title>relay-htcp 管理面板</title>
+<title>Relay-Htcp</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 <script>
@@ -37,7 +37,7 @@
   <form id="login-form" class="login-card">
     <div class="login-brand">
       <img class="brand-mark" src="favicon.svg" alt="" aria-hidden="true">
-      <h1>relay-htcp</h1>
+      <h1>Relay-Htcp</h1>
     </div>
     <p class="login-subtitle">登录以管理隧道、路由与配置。</p>
     <input id="login-user" autocomplete="username" placeholder="用户名" required>
@@ -51,22 +51,33 @@
   <header class="app-header">
     <div class="brand">
       <img class="brand-mark" src="favicon.svg" alt="" aria-hidden="true">
-      <h1>relay-htcp <span id="role-badge" class="badge"></span></h1>
+      <h1>Relay-Htcp <span id="role-badge" class="badge"></span></h1>
     </div>
     <nav class="tabs" aria-label="页面">
       <button class="tab active" data-tab="status">状态</button>
       <button class="tab" data-tab="config">配置</button>
+      <button class="tab" data-tab="tokens" id="tokens-tab" style="display:none">客户端 Token</button>
+      <button class="tab" data-tab="ip-access" id="ip-tab" style="display:none">IP 访问</button>
       <button class="tab" data-tab="users" id="users-tab">用户</button>
     </nav>
     <div class="header-actions">
+      <button id="restart-btn" type="button" class="danger small hidden"
+        title="重新读取配置、重建隧道并重新绑定本地监听">重启</button>
       <select class="theme-select" data-theme-select aria-label="主题" title="外观">
         <option value="auto">跟随系统</option>
         <option value="dark">深色</option>
         <option value="light">浅色</option>
         <option value="black">纯黑</option>
       </select>
-      <span id="whoami" class="muted"></span>
-      <button id="logout-btn" class="secondary small">退出</button>
+      <div class="user-menu" id="user-menu">
+        <button type="button" class="user-menu-toggle" id="user-menu-toggle" aria-haspopup="menu" aria-expanded="false">
+          <span id="whoami" class="user-name"></span>
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="user-menu-panel hidden" id="user-menu-panel" role="menu">
+          <button type="button" id="logout-btn" class="danger" role="menuitem">退出登录</button>
+        </div>
+      </div>
     </div>
   </header>
 
@@ -87,9 +98,57 @@
           <button id="cfg-save" type="button">保存配置</button>
         </div>
       </div>
+      <div id="cfg-subtabs" class="sub-tabs hidden"></div>
       <pre id="cfg-result"></pre>
       <div id="cfg-form" class="config-form"></div>
       <textarea id="cfg-yaml" class="hidden" spellcheck="false"></textarea>
+    </section>
+
+    <section id="tab-tokens" class="hidden">
+      <div class="panel">
+        <div class="config-bar">
+          <span class="muted">每个 Token 绑定一个路由；Token 只在创建或重新生成时显示一次。</span>
+          <button id="token-add" type="button">新建 Token</button>
+        </div>
+        <div id="token-result" class="token-result"></div>
+        <div class="table-wrap">
+          <table id="tokens-table">
+            <thead>
+              <tr><th>名称</th><th>专属路由</th><th>状态</th><th>Token</th><th>操作</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-ip-access" class="hidden">
+      <div class="panel">
+        <h2>IP 访问控制</h2>
+        <p class="muted">
+          每行一个 IP 或 CIDR。白名单非空时只允许白名单中的地址；黑名单始终拒绝；
+          127.0.0.1 / ::1 永不过滤，便于本地恢复。
+        </p>
+        <p class="muted">
+          当前识别到的客户端 IP：<span id="ip-client" class="mono">-</span>
+          （兼容 Cloudflare / cloudflared 的 CF-Connecting-IP 与 X-Forwarded-For）。
+        </p>
+        <form id="ip-form" class="ip-form">
+          <label class="form-row">
+            <span class="form-label">白名单</span>
+            <textarea id="ip-whitelist" rows="7" spellcheck="false" placeholder="203.0.113.7&#10;198.51.100.0/24"></textarea>
+          </label>
+          <label class="form-row">
+            <span class="form-label">黑名单</span>
+            <textarea id="ip-blacklist" rows="7" spellcheck="false" placeholder="192.0.2.44&#10;2001:db8::/32"></textarea>
+          </label>
+          <div class="ip-actions">
+            <button type="submit">保存规则</button>
+            <button type="button" id="ip-reload" class="secondary">重新读取</button>
+          </div>
+          <p id="ip-result" class="muted"></p>
+        </form>
+      </div>
     </section>
 
     <section id="tab-users" class="hidden">
@@ -117,6 +176,53 @@
     </section>
   </main>
 </div>
+
+<dialog id="token-dialog" class="dialog">
+  <form id="token-form" class="dialog-form">
+    <div class="dialog-head"><h3 id="token-dialog-title">新建 Token</h3></div>
+    <div class="dialog-body">
+      <input type="hidden" id="token-index" value="-1">
+      <div class="token-fields">
+        <label class="form-row">
+          <span class="form-label">名称</span>
+          <input id="token-name" maxlength="64" placeholder="office-laptop" autocomplete="off">
+        </label>
+        <div class="form-row route-field">
+          <span class="form-label">专属路由（可多选）</span>
+          <div id="token-routes" class="route-checklist"></div>
+          <small class="muted">不选 = 全部路由（不推荐）</small>
+        </div>
+        <label class="form-row">
+          <span class="form-label">Token</span>
+          <input id="token-value" type="password" autocomplete="new-password" placeholder="留空 = 自动生成 / 保持不变">
+        </label>
+        <div class="token-checks">
+          <label class="check-row"><input type="checkbox" id="token-enabled" checked> 启用</label>
+          <label class="check-row"><input type="checkbox" id="token-generate"> 重新生成 Token</label>
+        </div>
+      </div>
+      <p id="token-hint" class="muted"></p>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="token-cancel" class="secondary">取消</button>
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="app-dialog" class="dialog">
+  <form id="app-dialog-form" class="dialog-form">
+    <div class="dialog-head"><h3 id="app-dialog-title"></h3></div>
+    <div class="dialog-body">
+      <p id="app-dialog-message" class="dialog-message"></p>
+      <input id="app-dialog-input" class="hidden" autocomplete="off">
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="app-dialog-cancel" class="secondary">取消</button>
+      <button type="submit" id="app-dialog-ok">确定</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="app.js"></script>
 </body>

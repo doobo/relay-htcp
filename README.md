@@ -18,7 +18,9 @@
 
 - **HTTP/2 多路复用**：一条底层连接上同时承载控制流和任意多条数据流，避免每个 TCP 连接重复 TLS 握手。
 - **连接池**：客户端可建立多条独立隧道连接，新数据流轮询分配。
-- **认证与路由**：Bearer Token 认证；每个 Token 可限制可访问的路由；路由名到内网地址的映射在服务端集中管理。
+- **多服务端与故障转移**：客户端可配置多个服务端；每个本地监听可选择一个或多个服务端，策略支持轮询（`round_robin`）和故障转移（`failover`，始终优先第一个，服务端不可用或数据流打不开时才用下一个）。
+- **CDN / Cloudflare 适配**：每个服务端可选 `transport: xhttp`，把双向流拆成“短上传 POST + 长下载 GET”，不依赖双向 HTTP/2 请求体，可穿过 Cloudflare 等七层代理；默认的 `http` 传输仍保留给直连或四层转发场景。
+- **认证与路由**：Bearer Token 认证；每个 Token 可绑定一个或多个路由（建议按最小权限分配）；路由名到内网地址的映射在服务端集中管理。
 - **心跳与自愈**：PING/PONG 保活，连续丢失 `heartbeat_miss` 次后自动重连；指数退避。
 - **TLS**：支持真实证书、自签证书、自定义 CA；ALPN 优先协商 `h2`。
 - **明文 h2c**：无 TLS 时使用 HTTP/2 明文（h2c），适合内网和测试。
@@ -27,9 +29,12 @@
 - **端口共用与伪装**：服务端管理面板可挂到隧道端口下的自定义路径，外部只看到一个 Web 服务。
 - **加密登录与主题**：登录密码用 RSA-OAEP + AES-GCM（不支持 WebCrypto 时回退 TweetNaCl）加密；支持跟随系统/深色/浅色/纯黑主题。
 - **表单化配置**：配置页按角色渲染结构化表单，密钥字段掩码显示、留空保持原值；仍可切换到 YAML 高级模式。
+- **客户端 Token 独立页**：Token 列表从配置表单拆出，支持路由绑定、启用/禁用、一次性生成或重新生成；密钥只在生成时显示一次。
+- **IP 访问控制**：面板内维护黑白名单（IP/CIDR），默认空；白名单非空时只放行白名单，黑名单始终拒绝，回环地址不受限制；兼容 Cloudflare / cloudflared 的 `CF-Connecting-IP`、`X-Forwarded-For`。
 - **密钥入库加密**：SQLite 中的配置与 Token 采用 AES-256-GCM 信封加密（随机数据密钥 + 独立主密钥），主密钥默认保存在数据库旁的 `0600` 密钥文件，也可用环境变量注入。
-- **管理面板**：登录、实时状态、连接与流量统计、配置编辑、用户与角色管理，前端已内嵌进二进制。
+- **管理面板**：登录、实时状态、连接与流量统计、配置编辑、Token 管理、IP 访问控制、用户与角色管理，前端已内嵌进二进制。客户端面板支持一键重启：重新读取配置、重建隧道连接池并重新绑定本地监听，原本需要重启才生效的字段（`servers`、`tunnel.*`、`log.level` 等）也会立即应用。
 - **单个二进制**：无额外运行时依赖；配置文件、TLS 证书和可选的 SQLite 数据库按需挂载。
+- **无配置文件启动**：服务端和客户端都可以不写 `-config`。服务端使用内置默认值；客户端自动在 `./data/client.yaml` 生成引导配置并打开管理面板，配置完成后点击“重启”即可生效。
 
 ## 工作原理
 
@@ -103,7 +108,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
 `server.yaml`：
 
 ```yaml
-listen: ":8443"
+listen: ":5630"
 
 tls:
   cert: "server.crt"
@@ -113,10 +118,10 @@ auth:
   tokens:
     - name: office-laptop
       token: "请替换为足够随机的长 Token"
-      routes: [ssh]          # 留空表示允许所有路由
+      routes: [ssh, mysql]   # 可绑定多个路由；留空 = 全部（不推荐）
     - name: ops
       token: "另一个 Token"
-      # routes 省略 = 所有路由
+      routes: [mysql]        # 不同服务用不同 Token，互相隔离
 
 routes:
   - name: ssh
@@ -143,34 +148,66 @@ log:
 openssl rand -hex 32
 ```
 
-启动：
+启动（`-config` 可选，`listen` 省略时默认 `:5630`）：
 
 ```bash
+# 有配置文件
 ./relay-htcp server -config server.yaml
+
+# 不带子命令默认就是 server；完全不用 -config 时使用内置默认值
+#   监听 :5630，管理面板 /admin/，数据库 ./data/admin.db
+#   默认允许所有 IP 访问管理面板（建议登录后在“IP 访问”页限制）
+#   首次启动会在日志打印随机 admin 密码
+./relay-htcp
+# 等价于
+./relay-htcp server
+
+# 当前目录存在 server.yaml 时会自动加载
 ```
+
+无配置启动会生成一个已禁用的占位 Token 和 `default → 127.0.0.1:22` 占位路由，启动后可在管理面板里修改。
+
+临时改端口不必改配置：
+
+```bash
+./relay-htcp server -config server.yaml -port 8443
+./relay-htcp server -config server.yaml -listen 127.0.0.1:8443
+```
+
+`-listen` / `-port` 优先于配置文件，也优先于面板保存到数据库里的 `listen`。
 
 ### 5. 配置并启动客户端
 
 `client.yaml`：
 
 ```yaml
-server: "https://tunnel.example.com:8443"
+# 全局默认凭证；servers 里的条目可单独覆盖 token / CA
+auth:
+  token: "请替换为服务端配置的同一个 Token"
 
 tls:
   ca_file: "server.crt"       # 使用自签证书时
   # insecure_skip_verify: true  # 仅测试环境
 
-auth:
-  token: "请替换为服务端配置的同一个 Token"
+servers:
+  - name: primary
+    url: "https://tunnel.example.com:5630"
+  - name: backup
+    url: "https://backup.example.com:5630"
+    token: "备份节点使用的另一个 Token"   # 可选
 
 listeners:
   - local: "127.0.0.1:2222"
     target: "ssh"
+    servers: [primary, backup]
+    strategy: failover        # 优先 primary，不可用时才用 backup
   - local: "127.0.0.1:33060"
     target: "mysql"
+    servers: [primary, backup]
+    strategy: round_robin     # 在 primary / backup 之间轮询
 
 tunnel:
-  connections: 2
+  connections: 2              # 每个服务端各自建立 2 条连接
   heartbeat: 15s
   heartbeat_miss: 3
   reconnect_min: 1s
@@ -184,11 +221,24 @@ log:
   level: info
 ```
 
+> 仍然兼容旧的单服务端写法：只写 `server: "https://..."` 时，启动时会自动迁移为 `servers` 列表。`listeners[].servers` 留空表示使用全部服务端；`strategy` 省略时默认 `round_robin`。
+
 启动：
 
 ```bash
 ./relay-htcp client -config client.yaml
 ```
+
+也可以完全不用 `-config`：
+
+```bash
+./relay-htcp client
+```
+
+- 当前目录存在 `data/client.yaml` 时直接加载；没有时兼容旧的 `./client.yaml`；
+- 两者都不存在时，自动创建 `data/client.yaml` 和一个只开管理面板的引导配置（`servers` / `listeners` 为空）；
+- 客户端管理面板默认在 `http://127.0.0.1:8081/admin/`，首次启动的随机密码打印在日志中；
+- 在面板里填写服务端、Token 和本地监听，保存后点击“重启”即可生效。数据库默认放在 `data/client-admin.db`。
 
 ### 6. 验证
 
@@ -214,26 +264,94 @@ listen: ":8080"
 # 不写 tls 段
 
 # client.yaml
-server: "http://192.168.1.10:8080"
+servers:
+  - name: lan
+    url: "http://192.168.1.10:8080"
 ```
 
 注意：h2c 不加密，Token 和数据都会以明文传输，只应在可信网络中使用。
 
+### 8. Cloudflare / CDN（xhttp 传输）
+
+经过 Cloudflare 橙云或其他七层 CDN 时，默认 `http` 传输的长时间双向 POST 会被缓冲或拒绝（日志里常见 `PROTOCOL_ERROR`、超时，或把 HTTP/1.1 响应当成 HTTP/2 帧）。此时把该服务端改成 `transport: xhttp`：
+
+```yaml
+servers:
+  - name: cloudflare
+    url: "https://ws.example.com"     # 走 CDN 的域名
+    transport: xhttp
+    token: "与服务端一致的 Token"
+
+listeners:
+  - local: "127.0.0.1:2222"
+    target: "ssh"
+    servers: [cloudflare]
+    strategy: failover
+```
+
+relay-htcp 的 xhttp 前缀默认是 **`/relay`**，因此同一域名下的 Xray 可以继续占用 `/xhttp`，互不冲突。只要确保 Nginx 把 `/relay/` 转发到 relay-htcp 的监听端口：
+
+```nginx
+location /relay/ {
+    proxy_pass http://127.0.0.1:5630;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+如果还需要换前缀，服务端和客户端必须一起改：
+
+```yaml
+# 服务端 server.yaml
+tunnel:
+  xhttp_path: "/relay"
+
+# 客户端 client.yaml
+servers:
+  - name: cloudflare
+    url: "https://ws.example.com"
+    transport: xhttp
+    xhttp_path: "/relay"
+```
+
+xhttp 把每条 TCP 流拆成普通的 HTTP 请求：
+
+- **下载**：`GET /relay/download?session=...`，长连接流式响应（服务端 → 客户端）
+- **上传**：`POST /relay/upload?session=...`，携带一小批帧的短请求（客户端 → 服务端）
+- **保活**：`POST /relay/ping`
+
+这样 CDN 不需要支持双向 HTTP/2 请求体；上传总是完整结束的短 POST，下载是普通流式响应。它对应 Xray XHTTP 的 packet-up + stream-down 思路（不是依赖双向流的 stream-one）。代价是上传会按批发送，交互延迟比直连 `http` 传输略高。服务端无需额外开关，同一监听同时支持两种传输。
+
+Cloudflare 侧建议：
+
+- 保持橙云即可，不需要 WebSocket 或 gRPC；
+- 给 `/relay/download*` 加一条 **Configuration Rule → Response body buffering = None**。默认的 Standard 会先缓冲/检查响应体开头，可能让下载流延迟到连接结束才到达；
+- 不要缓存 `/relay/*`（服务端已返回 `Cache-Control: no-store`）；
+- **Quick Tunnel 会缓冲 GET 响应直到连接结束**，不能用来验证 xhttp 的实时性；请用橙云域名或 named tunnel 测试。
+
+Cloudflare 侧保持橙云即可，不需要 WebSocket；使用 cloudflared 时把源站指向隧道的监听端口。
+
 ## 配置参考
 
-配置采用 YAML，启动时校验；未知字段会被忽略，必填项缺失会直接报错退出。
+配置采用 YAML，启动时校验；未知字段会被忽略，必填项缺失会直接报错退出。`log.level` 省略时默认 `info`，只接受 `debug` / `info` / `warn` / `error`。每个客户端 Token 可以绑定一个或多个路由，建议按最小权限分配。
+
+> 例外：客户端在 `admin.enabled: true` 且没有任何 `servers` / `listeners` 时允许启动，用于无配置引导模式。服务端无配置文件启动时同样使用内置占位配置。
 
 ### 服务端 `server.yaml`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `listen` | string | 必填 | 监听地址，如 `:8443`、`127.0.0.1:8443` |
+| `listen` | string | `:5630` | 监听地址，如 `:5630`、`127.0.0.1:5630`；可用启动参数 `-listen` / `-port` 临时覆盖 |
 | `tls.cert` | string | 空 | 证书文件路径；与 `tls.key` 同时为空时使用明文 h2c |
 | `tls.key` | string | 空 | 私钥文件路径 |
 | `auth.tokens` | list | 必填 | 至少一个 Token，Token 值不能为空且不能重复 |
 | `auth.tokens[].name` | string | 空 | 身份名称，用于日志和管理面板展示 |
 | `auth.tokens[].token` | string | 必填 | Bearer Token 明文，建议至少 32 字节随机值 |
-| `auth.tokens[].routes` | list | 空 | 允许访问的路由名；为空表示允许所有路由 |
+| `auth.tokens[].routes` | list | 空 | 该 Token 允许访问的路由名，可多选；留空表示允许所有路由（不推荐） |
+| `auth.tokens[].enabled` | bool | `true` | 是否启用；禁用的 Token 保留在配置里但不再通过认证 |
 | `routes` | list | 必填 | 至少一个路由，名称不能重复 |
 | `routes[].name` | string | 必填 | 逻辑路由名，客户端通过 `X-Tunnel-Target` 引用 |
 | `routes[].target` | string | 必填 | 内网目标地址，如 `127.0.0.1:22` |
@@ -241,6 +359,7 @@ server: "http://192.168.1.10:8080"
 | `tunnel.max_connections` | int | `0` | 同时在线控制连接数上限，`0` 表示不限制 |
 | `tunnel.dial_timeout` | duration | `10s` | 拨号内网目标的超时时间 |
 | `tunnel.idle_timeout` | duration | `90s` | 控制流静默多久后断开 |
+| `tunnel.xhttp_path` | string | `/relay` | xhttp 传输的端点前缀；默认 `/relay`，避免与 Xray 常用的 `/xhttp` 冲突 |
 | `disguise.enabled` | bool | `true` | 是否启用诱饵页和伪装响应头 |
 | `log.level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `admin.*` | object | 见下文 | 管理面板配置 |
@@ -249,14 +368,24 @@ server: "http://192.168.1.10:8080"
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `server` | string | 必填 | 服务端地址，格式 `scheme://host[:port]`，不能带路径；`https://` 走 TLS，`http://` 走 h2c |
-| `tls.insecure_skip_verify` | bool | `false` | 跳过证书校验，仅测试环境使用 |
-| `tls.ca_file` | string | 空 | 自定义 CA 证书（PEM），用于自签或私有 CA |
-| `auth.token` | string | 必填 | 与服务端 Token 一致 |
-| `listeners` | list | 必填 | 至少一个本地监听，`local` 不能重复 |
+| `servers` | list | 必填* | 至少一个服务端；每个服务端独立建连、独立连接池。*`admin.enabled: true` 时可为空 |
+| `servers[].name` | string | `server-N` | 服务端名称，供 `listeners[].servers` 引用；不能重复 |
+| `servers[].url` | string | 必填 | 服务端地址，格式 `scheme://host[:port]`，不能带路径 |
+| `servers[].transport` | string | `http` | `http` 直连（要求端到端 HTTP/2 全双工）；`xhttp` 适配 Cloudflare / CDN（短上传 POST + 长下载 GET） |
+| `servers[].xhttp_path` | string | `/relay` | xhttp 端点前缀，必须与服务端 `tunnel.xhttp_path` 一致 |
+| `servers[].token` | string | 空 | 覆盖 `auth.token`；留空使用全局 Token |
+| `servers[].ca_file` | string | 空 | 覆盖 `tls.ca_file`；留空使用全局 CA |
+| `servers[].insecure_skip_verify` | bool | `false` | 为 true 时跳过该服务端的证书校验（与全局值取或） |
+| `server` | string | 空 | 旧版单服务端写法；与 `servers` 互斥，启动时自动迁移 |
+| `tls.insecure_skip_verify` | bool | `false` | 全局跳过证书校验，仅测试环境使用 |
+| `tls.ca_file` | string | 空 | 全局自定义 CA 证书（PEM） |
+| `auth.token` | string | 空 | 全局默认 Token；每个服务端也可单独配置 |
+| `listeners` | list | 必填* | 至少一个本地监听，`local` 不能重复。*`admin.enabled: true` 时可为空 |
 | `listeners[].local` | string | 必填 | 本地监听地址，如 `127.0.0.1:2222` |
 | `listeners[].target` | string | 必填 | 服务端路由名 |
-| `tunnel.connections` | int | `2` | 连接池大小，即独立 HTTP/2 连接数，需重启生效 |
+| `listeners[].servers` | list | 空 | 选择哪些服务端（按名称）；留空 = 全部 |
+| `listeners[].strategy` | string | `round_robin` | `round_robin` 轮询 / `failover` 优先第一个，服务端不可用或数据流打不开时才用下一个 |
+| `tunnel.connections` | int | `2` | 每个服务端的连接池大小，即该服务端的独立 HTTP/2 连接数；需重启生效 |
 | `tunnel.heartbeat` | duration | `15s` | PING 发送间隔 |
 | `tunnel.heartbeat_miss` | int | `3` | 连续丢失多少次 PONG 后判定隧道断开 |
 | `tunnel.reconnect_min` | duration | `1s` | 重连初始退避 |
@@ -274,10 +403,10 @@ server: "http://192.168.1.10:8080"
 | `enabled` | bool | `false` | 是否启用管理面板；关闭时不监听端口、不创建数据库 |
 | `shared` | bool | `false` | 仅服务端：把面板挂到隧道端口，不再单独监听；公网节点推荐开启 |
 | `path` | string | `/`（独立）/`/admin`（共用） | 面板 URL 前缀；共用模式下建议改成不易猜到的路径 |
-| `allowed_cidrs` | list | 共用模式默认回环 | 允许访问面板的 CIDR；独立模式为空表示不限制 |
+| `allowed_cidrs` | list | 共用模式默认全部 IP | 静态 IP 白名单（默认 `0.0.0.0/0`、`::/0`）；运行期可在面板“IP 访问”页收紧 |
 | `listen` | string | `127.0.0.1:8080` | 仅 `shared: false` 时使用，务必只绑定内网/回环地址 |
 | `token` | string | 空 | 可选的静态管理 Token，供脚本直接访问 API，拥有 admin 权限 |
-| `db_path` | string | `relay-htcp-admin.db` | SQLite 数据库路径 |
+| `db_path` | string | `data/admin.db` | SQLite 数据库路径；目录不存在会自动创建 |
 | `key_file` | string | `<db_path>.key` | 配置入库加密的主密钥文件；首次启动自动生成（0600） |
 | `default_username` | string | `admin` | 首次运行创建的管理员用户名 |
 | `default_password` | string | 空 | 首次运行的管理员密码；为空则随机生成并只在日志中打印一次 |
@@ -303,8 +432,8 @@ admin:
   enabled: true
   shared: true
   path: "/ops-console"           # 自定义不易猜到的前缀
-  allowed_cidrs: ["127.0.0.0/8", "::1/128"]
-  db_path: "relay-htcp-admin.db"
+  allowed_cidrs: ["0.0.0.0/0", "::/0"]  # 默认全部放行；可在“IP 访问”页限制
+  db_path: "data/admin.db"
   default_username: "admin"
   default_password: ""           # 留空 = 首次运行生成随机密码并打印到日志
   session_ttl: 24h
@@ -318,7 +447,7 @@ admin:
   shared: false
   path: "/ops-console"
   listen: "127.0.0.1:8080"
-  db_path: "relay-htcp-admin.db"
+  db_path: "data/admin.db"
 ```
 
 第一次启动时，日志会打印：
@@ -327,17 +456,21 @@ admin:
 admin panel: created default user with a generated initial password (shown only once) user=admin password=...
 ```
 
+未配置 `db_path` 时默认使用 `./data/admin.db`，密钥文件为 `./data/admin.db.key`，目录不存在会自动创建。
+
 请立即保存该密码并登录：
 
-- 共用模式：`https://tunnel.example.com:8443/ops-console/`（即隧道端口 + `admin.path`）
+- 共用模式：`https://tunnel.example.com:5630/ops-console/`（即隧道端口 + `admin.path`）
 - 独立模式：`http://127.0.0.1:8080/ops-console/`
 
 如果服务端在远程机器上，建议通过 SSH 端口转发访问共用端口（源地址会呈现为回环，正好命中默认白名单）：
 
 ```bash
-ssh -L 8443:127.0.0.1:8443 user@server
-# 然后打开 http://127.0.0.1:8443/ops-console/
+ssh -L 5630:127.0.0.1:5630 user@server
+# 然后打开 http://127.0.0.1:5630/ops-console/
 ```
+
+独立模式下直接打开管理监听端口根路径也会跳转到登录页（`/` → `admin.path/`）。共用模式同样支持：**命中 `allowed_cidrs` 白名单的来源**访问 `/` 会跳到 `admin.path/`，其他来源仍然看到诱饵页，因此不会向公网暴露管理入口。
 
 ### 登录安全与主题
 
@@ -346,15 +479,41 @@ ssh -L 8443:127.0.0.1:8443 user@server
 - **主题**：支持 跟随系统 / 深色 / 浅色 / 纯黑，登录页和顶栏都能切换，选择保存在浏览器 `localStorage`。
 - 登录后默认进入结构化配置表单，密钥字段始终掩码；支持切换 YAML 高级模式。
 
-面板包含三个页签：
+面板页签：
 
 - **状态**：运行时长、活跃隧道/连接、上下行字节数、诱饵页访问次数、实时连接列表。
 - **配置**：默认使用结构化表单编辑，字段分组随服务端/客户端角色自动变化；可切换到 YAML 高级模式。保存结果会列出哪些字段已热应用、哪些需要重启。
+- **客户端 Token**（仅服务端）：独立管理页，可新增/编辑/删除 Token、多选绑定路由、启用/禁用、一次性生成或重新生成密钥。
+- **IP 访问**（仅管理员）：维护管理面板的黑白名单，支持 IP 与 CIDR，保存后立即生效。
 - **用户**：创建/修改/删除用户，分配 `admin` 或 `viewer` 角色，启用/禁用账号。
+
+顶栏右侧把用户名和“退出登录”合并成了一个下拉菜单。
+
+### 客户端 Token 页
+
+Token 已从配置表单中拆出，避免在长表单里误操作。页面上可以：
+
+- 新建 Token：留空自动生成随机值，保存成功后**只显示一次**并支持复制；
+- 编辑：修改名称、路由（可多选）、启用状态；Token 留空表示保持不变；
+- 重新生成：勾选后生成新值并显示一次，旧值立即失效；
+- 删除：最后一个 Token 不允许删除（配置要求至少保留一个）。
+
+密钥不会出现在列表响应里，只显示“已设置 …abcd”形式的尾部提示。
+
+### IP 访问控制
+
+`IP 访问` 页把规则保存在 SQLite（与其他设置一样加密），默认两个列表都为空：
+
+- 白名单非空：只允许白名单中的 IP/CIDR；
+- 黑名单：命中的地址始终拒绝，即使同时出现在白名单；
+- `127.0.0.1` / `::1` 永不过滤，避免把本机锁在门外；
+- 两个列表都为空：允许所有来源。
+
+客户端 IP 解析顺序：当直连来源是回环或链路本地地址（本机 cloudflared、nginx 等）时，依次读取 `CF-Connecting-IP`、`X-Forwarded-For` 第一项、`X-Real-IP`；其他来源（包括普通内网地址）只信任 TCP 对端地址，防止伪造头部绕过白名单。
 
 ### 表单化配置
 
-配置页默认按角色渲染结构化表单：服务端包含监听/TLS、隧道参数、内网路由、客户端 Token；客户端包含服务端连接、本地监听、隧道参数。表单由后端 schema 驱动（`Provider.ConfigFormSchema`），后续新增可调参数只需在 schema 中加一行，前端和 API 无需改动。
+配置页默认按角色渲染结构化表单：服务端包含监听/TLS、隧道参数、内网路由（Token 已移到独立页）；客户端的配置页拆成“服务端 / 本地监听 / 隧道参数”三个子页签，服务端列表和本地监听分别编辑。服务端页可维护多个服务端及各自的 Token/CA，本地监听页为每个监听选择服务端并设置轮询或故障转移策略。表单由后端 schema 驱动（`Provider.ConfigFormSchema`），后续新增可调参数只需在 schema 中加一行，前端和 API 无需改动。
 
 密钥字段掩码规则：
 
@@ -397,10 +556,12 @@ KEK 来源（按优先级）：
 
 | 端 | 立即生效 | 需要重启 |
 |---|---|---|
-| 服务端 | `auth.tokens`、`routes`、`tunnel.dial_timeout`、`tunnel.idle_timeout`、`tunnel.max_connections`、`disguise.enabled` | `listen`、`tls`、`tunnel.max_concurrent_streams`、`log.level` |
-| 客户端 | `listeners`（新增/删除/改目标）、`disguise` | `server`、`auth.token`、`tls`、`tunnel.*`、`log.level` |
+| 服务端 | `auth.tokens`、`routes`、`tunnel.dial_timeout`、`tunnel.idle_timeout`、`tunnel.max_connections`、`tunnel.xhttp_path`、`disguise.enabled` | `listen`、`tls`、`tunnel.max_concurrent_streams`、`log.level` |
+| 客户端 | `listeners`（新增/删除/改目标/改服务端选择） | `servers`、`auth.token`、`tls`、`tunnel.*`、`log.level` |
 
 客户端删除或改目标监听器时，已建立的连接会继续跑到结束，不会被强行中断。
+
+需要重启的字段保存后不会立即生效，可在客户端面板右上角点击“重启”：进程会原地重载配置、重建连接池并重新绑定监听，期间连接短暂中断，面板会话和已保存的配置保留。脚本也可以直接调用 `POST /api/restart`。
 
 ### 管理 API
 
@@ -419,10 +580,17 @@ Authorization: Bearer <session-token 或 admin.token>
 | `GET` | `/api/auth/me` | 当前身份 |
 | `POST` | `/api/auth/logout` | 注销当前会话 |
 | `GET` | `/api/status` | 实时状态 |
+| `POST` | `/api/restart` | 重启客户端（重新读取配置、重建连接池、重新绑定监听）；仅客户端支持，需要 admin 权限 |
 | `GET` | `/api/config` | 当前配置 YAML 与来源（`file`/`db`） |
 | `PUT` | `/api/config` | 保存配置，body 为 `{"yaml":"..."}` |
 | `GET` | `/api/config/form` | 结构化表单 schema 与当前值（secret 字段已掩码） |
 | `PUT` | `/api/config/form` | 保存表单，body 为 `{"values":{...}}`；secret 留空保持原值 |
+| `GET` | `/api/tokens` | 客户端 Token 列表（仅服务端；密钥只返回尾部提示） |
+| `POST` | `/api/tokens` | 新建 Token，空 token 自动生成并在响应中返回一次 |
+| `PUT` | `/api/tokens/{index}` | 修改名称/路由/启用状态；`generate:true` 重新生成 |
+| `DELETE` | `/api/tokens/{index}` | 删除 Token；至少保留一个 |
+| `GET` | `/api/ip-access` | 黑白名单与当前识别到的客户端 IP |
+| `PUT` | `/api/ip-access` | 保存黑白名单，立即生效 |
 | `GET` | `/api/users` | 用户列表 |
 | `POST` | `/api/users` | 创建用户 |
 | `PUT` | `/api/users/{id}` | 修改密码/角色/启用状态 |
@@ -451,6 +619,9 @@ curl -s http://127.0.0.1:8080/api/status \
 |---|---|---|---|
 | `POST` | `/tunnel` | Bearer Token | 控制流，保持长连接并交换 PING/PONG |
 | `POST` | `/stream` | Bearer Token | 数据流，必须携带 `X-Tunnel-Target: <route>` |
+| `POST` | `/relay/ping` | Bearer Token | xhttp 传输的保活请求 |
+| `GET` | `/relay/download?session=<id>` | Bearer Token | xhttp 下载流，响应体持续输出帧 |
+| `POST` | `/relay/upload?session=<id>` | Bearer Token | xhttp 上传批，body 为若干帧 |
 | `GET` | `/health` | 无 | 健康检查，返回 `{"status":"ok","connections":N,"decoy_views":M}` |
 | 其他 | 任意 | 无 | 启用伪装时返回诱饵页，否则返回 404 |
 
@@ -467,13 +638,14 @@ Content-Type: application/octet-stream
 ## 安全建议
 
 1. **生产环境必须使用 TLS**，并优先使用真实 CA 签发的证书；不要长期启用 `insecure_skip_verify`。
-2. **Token 要足够强**：至少 32 字节随机值（`openssl rand -hex 32`），不同客户端使用不同 Token，并按需限制 `routes`。
-3. **管理面板默认只允许回环访问**。共用模式（`admin.shared: true`）会把登录入口放到隧道端口，请务必：把 `admin.path` 改成不易猜到的前缀、保留 `allowed_cidrs` 白名单（默认仅回环）、并通过 TLS 暴露端口；远程管理优先走 SSH 端口转发或 VPN。
+2. **Token 要足够强**：至少 32 字节随机值（`openssl rand -hex 32`），每个服务使用独立 Token，并按最小权限配置 `routes`，不要复用。
+3. **管理面板默认允许所有 IP 访问**。共用模式（`admin.shared: true`）会把登录入口放到隧道端口；上线前请把 `admin.path` 改成不易猜到的前缀，并在“IP 访问”页配置白名单/黑名单收紧访问，同时通过 TLS 暴露端口。远程管理优先走 SSH 端口转发或 VPN。
 4. **不要在管理面板保存后手工改文件**，以免误以为配置已生效；以面板显示的来源为准。
 5. **保护数据库、密钥文件和配置文件**：数据库中的配置与 Token 已加密，但 `<db_path>.key`（或 `RELAY_HTCP_MASTER_KEY`）是解密钥匙，应与数据库分开保管；配置文件写入权限为 `0600`，且内容仍是明文，数据库与配置文件都应限制访问。
 6. **`/health` 是公开端点**，会暴露连接数；如不用于监控，建议在边界代理/防火墙处屏蔽。
 7. **伪装不是加密**。TLS 才是传输保护手段；伪装只影响流量外观，无法对抗主动探测或流量分析。
 8. 仅在你拥有或获得明确授权的网络和主机上使用本工具，并遵守当地法律法规。
+9. **IP 访问控制页的规则会立即生效**。白名单配错可能把远程管理端锁在外面，回环地址（本机）始终保留；远程环境请先确认可通过 SSH 端口转发从本机恢复。转发头只在直连来源为回环/私有地址时才会被信任。
 
 ## 测试
 
@@ -486,11 +658,16 @@ go test ./...
 
 - 协议帧编解码、最大帧、非法类型、截断输入
 - 服务端认证、路由权限、健康检查、诱饵页
+- 端口默认 `:5630`、启动参数覆盖、Token 多路由校验、日志级别校验
+- 无配置文件启动：服务端内置默认配置、自动创建 `data/admin.db`；客户端自动创建 `data/client.yaml`、`data/client-admin.db` 引导并可通过面板完成配置
 - 客户端连接池、监听器热增删、配置热应用
 - 端到端明文 h2c、TLS、断线重连
+- xhttp 传输：h2c、TLS，以及经过 HTTP/1.1 流式反代（模拟 CDN）的端到端回显
 - 管理后台登录、限流、会话、用户 CRUD、配置保存、角色权限
 - 加密登录：WebCrypto 与 NaCl 两种载荷、nonce 单次使用、过期拒绝、前缀挂载与 IP 白名单
 - 表单化配置：schema 路径校验、secret 掩码、留空保持原值、类型转换
+- 客户端 Token 页：列表掩码、创建/更新/删除、路由校验、一次性生成
+- IP 访问控制：白/黑名单、回环豁免、Cloudflare 转发头、规则持久化
 - 配置入库加密：落库密文、信封数据密钥、错误主密钥拒绝、篡改检测、旧明文自动迁移
 
 单独运行某个包：
@@ -513,6 +690,7 @@ internal/disguise/     浏览器头、诱饵页伪装
 internal/admin/        管理后台 API、SQLite 存储（配置入库加密）、加密登录、认证与限流
 internal/admin/ui/     内嵌的单页管理前端（主题、加密登录、表单配置、用户管理）
 config/                服务端/客户端示例配置
+data/                  运行时默认目录（client.yaml、admin.db / client-admin.db、主密钥、WAL；自动创建）
 Task.md                最初的设计与实施方案
 ```
 
@@ -522,7 +700,7 @@ Task.md                最初的设计与实施方案
 |---|---|---|
 | 启动报 `auth.tokens: at least one token required` | 配置缺少 Token | 按示例添加 `auth.tokens` |
 | 客户端 `server rejected tunnel: 401` | Token 不一致或未带 Bearer 前缀 | 核对两端 Token |
-| `route not permitted`（403） | 当前 Token 的 `routes` 不包含该路由 | 在服务端为该 Token 添加路由或清空 `routes` |
+| `route not permitted`（403） | 当前 Token 的 `routes` 不包含该路由 | 在客户端 Token 页为该 Token 勾选该路由，或调整 Token |
 | `unknown route`（404） | `listeners[].target` 与服务端 `routes[].name` 不一致 | 统一路由名 |
 | `target unavailable`（502） | 服务端无法连接内网目标 | 检查目标地址、端口和服务状态 |
 | `no live tunnel available` | 客户端未建立控制流 | 检查网络、TLS、Token 和服务端日志 |

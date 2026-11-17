@@ -10,7 +10,13 @@ const state = {
   statusTimer: null,
   statusLoaded: false,
   configMode: "form",
+  configSection: "",
   form: null,
+  tokens: [],
+  tokenRoutes: [],
+  tokenEdit: -1,
+  tokenLoaded: false,
+  restarting: false,
 };
 
 /* ---------- API ---------- */
@@ -132,6 +138,12 @@ function fmtMs(ms) {
   return new Date(ms).toLocaleString();
 }
 
+function strategyLabel(s) {
+  if (s === "failover") return "第一个可用（故障转移）";
+  if (s === "round_robin") return "轮询";
+  return s || "轮询";
+}
+
 function card(k, v, cls) {
   return '<div class="card"><div class="k">' + esc(k) + '</div>' +
     '<div class="v ' + (cls || "") + '">' + esc(v) + "</div></div>";
@@ -166,6 +178,8 @@ async function showApp() {
     // The role badge (server/client) is set by the first status poll.
     // Viewer role cannot manage users.
     $("#users-tab").style.display = me.role === "admin" ? "" : "none";
+    $("#token-add").style.display = me.role === "admin" ? "" : "none";
+    $("#ip-tab").style.display = me.role === "admin" ? "" : "none";
     startPolling();
   } catch (e) { /* showLogin already fired on 401 */ }
 }
@@ -287,6 +301,49 @@ async function doLogout() {
   showLogin();
 }
 
+/* ---------- restart client ---------- */
+
+async function restartClient() {
+  if (state.restarting) return;
+  if (!(await uiConfirm("重启客户端", "当前连接会短暂中断，重启后页面会自动重新加载。", { okText: "重启" }))) return;
+  state.restarting = true;
+  const btn = $("#restart-btn");
+  btn.disabled = true;
+  btn.textContent = "重启中…";
+  try {
+    await api("POST", "api/restart");
+  } catch (err) {
+    state.restarting = false;
+    btn.disabled = false;
+    btn.textContent = "重启";
+    if (err.message !== "unauthorized") await uiAlert("重启请求失败", err.message);
+    return;
+  }
+  // The panel goes away while the client reinitializes. Poll until it is
+  // serving again (the DB sessions survive the restart), then reload.
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const resp = await fetch("api/status", {
+        headers: state.token ? { Authorization: "Bearer " + state.token } : {},
+        cache: "no-store",
+      });
+      if (resp.ok) {
+        location.reload();
+        return;
+      }
+      if (resp.status === 401) {
+        showLogin();
+        return;
+      }
+    } catch { /* still restarting */ }
+  }
+  state.restarting = false;
+  btn.disabled = false;
+  btn.textContent = "重启";
+  await uiAlert("重启超时", "请检查客户端日志");
+}
+
 /* ---------- tabs ---------- */
 
 function switchTab(name) {
@@ -295,6 +352,8 @@ function switchTab(name) {
   document.querySelectorAll("main > section").forEach((s) =>
     s.classList.toggle("hidden", s.id !== "tab-" + name));
   if (name === "config") loadConfig();
+  if (name === "tokens") loadTokens();
+  if (name === "ip-access") loadIPAccess();
   if (name === "users" && !state.usersLoaded) loadUsers();
 }
 
@@ -320,6 +379,10 @@ async function pollStatus() {
   const badge = $("#role-badge");
   badge.textContent = st.role;
   badge.className = "badge" + (st.role === "client" ? " client" : "");
+  $("#tokens-tab").style.display = st.role === "server" ? "" : "none";
+  // Only the client supports an in-place restart, and only admins may do it.
+  const canRestart = st.role === "client" && state.role === "admin" && !state.restarting;
+  $("#restart-btn").classList.toggle("hidden", !canRestart);
 
   const cards = [card("版本", st.version), card("运行时长", fmtUptime(st.uptime_sec))];
   let live = "";
@@ -341,28 +404,40 @@ async function pollStatus() {
     );
   } else if (st.role === "client" && st.client) {
     const c = st.client;
-    cards.push(card("隧道服务端", c.server_addr));
+    const servers = c.servers || [];
+    cards.push(card("服务端", servers.length
+      ? servers.map((s) => s.name).join("、")
+      : c.server_addr));
     const online = (c.slots || []).filter((s) => s.state === "connected").length;
     cards.push(card("连接池", online + " / " + (c.slots || []).length + " 就绪",
       online > 0 ? "ok" : "warn"));
     live =
+      "<h3 class='muted' style='margin:14px 0 6px'>服务端</h3>" +
+      table(["名称", "地址", "传输", "连接"],
+        servers.map((s) => [
+          esc(s.name), esc(s.url), esc(s.transport || "http"),
+          '<span class="pill ' + (s.online > 0 ? "ok" : "warn") + '">' +
+            s.online + " / " + s.total + "</span>",
+        ])) +
       "<h3 class='muted' style='margin:14px 0 6px'>连接池</h3>" +
-      table(["槽位", "状态", "建立时间", "最后 PONG"],
+      table(["服务端", "槽位", "状态", "建立时间", "最后 PONG"],
         (c.slots || []).map((s) => [
-          String(s.index),
+          esc(s.server || "-"), String(s.index),
           '<span class="pill ' + (s.state === "connected" ? "ok" : "warn") + '">' +
             esc(s.state) + "</span>",
           fmtMs(s.connected_at), fmtMs(s.last_pong_at),
         ])) +
       "<h3 class='muted' style='margin:14px 0 6px'>本地监听</h3>" +
-      table(["本地地址", "路由", "活跃连接"],
+      table(["本地地址", "路由", "服务端", "策略", "活跃连接"],
         (c.listeners || []).map((l) => [
-          esc(l.local), esc(l.target), String(l.active_conns),
+          esc(l.local), esc(l.target),
+          (l.servers && l.servers.length) ? esc(l.servers.join(", ")) : "全部",
+          esc(strategyLabel(l.strategy)), String(l.active_conns),
         ])) +
       "<h3 class='muted' style='margin:14px 0 6px'>活跃连接</h3>" +
-      table(["本地", "来源", "路由", "入站", "出站", "开始时间"],
+      table(["本地", "来源", "路由", "服务端", "入站", "出站", "开始时间"],
         (c.active_conns || []).map((x) => [
-          esc(x.local), esc(x.from), esc(x.route),
+          esc(x.local), esc(x.from), esc(x.route), esc(x.server || "-"),
           fmtBytes(x.bytes_in), fmtBytes(x.bytes_out), fmtMs(x.started_at),
         ]));
   }
@@ -425,15 +500,57 @@ function findFormField(path) {
 }
 
 function renderConfigForm(form) {
+  const sections = form.sections || [];
+  const keyed = sections.filter((sec) => !!sec.key);
+  const active = keyed.length ? activeSectionKey(keyed) : "";
+  renderConfigSubtabs(keyed);
   const values = form.values || {};
-  $("#cfg-form").innerHTML = (form.sections || []).map((sec) =>
-    '<section class="form-section">' +
+  $("#cfg-form").innerHTML = sections.map((sec) => {
+    const hidden = keyed.length && sec.key && sec.key !== active;
+    return '<section class="form-section' + (hidden ? " hidden" : "") + '"' +
+      (sec.key ? ' data-section="' + esc(sec.key) + '"' : "") + ">" +
       "<h2>" + esc(sec.title) + "</h2>" +
       '<div class="form-grid">' +
         sec.fields.map((f) => fieldHTML(f, values[f.path])).join("") +
       "</div>" +
-    "</section>"
-  ).join("");
+    "</section>";
+  }).join("");
+}
+
+// Config sections with a key are shown one at a time via sub-tabs. All
+// sections stay in the DOM so switching tabs never loses unsaved edits.
+function activeSectionKey(keyed) {
+  if (state.configSection && keyed.some((s) => s.key === state.configSection)) {
+    return state.configSection;
+  }
+  state.configSection = keyed[0] ? keyed[0].key : "";
+  return state.configSection;
+}
+
+function renderConfigSubtabs(keyed) {
+  const el = $("#cfg-subtabs");
+  if (!keyed.length) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.innerHTML = keyed.map((s) =>
+    '<button type="button" class="small" data-cfg-section="' +
+      esc(s.key) + '">' + esc(s.title) + "</button>").join("");
+  syncConfigSubtabs();
+}
+
+function syncConfigSubtabs() {
+  document.querySelectorAll("#cfg-subtabs [data-cfg-section]").forEach((b) =>
+    b.classList.toggle("active", b.dataset.cfgSection === state.configSection));
+  document.querySelectorAll("#cfg-form .form-section[data-section]").forEach((s) =>
+    s.classList.toggle("hidden", s.dataset.section !== state.configSection));
+}
+
+function selectConfigSection(key) {
+  state.configSection = key;
+  syncConfigSubtabs();
 }
 
 function fieldHTML(f, value) {
@@ -559,6 +676,253 @@ async function saveConfig() {
   }
 }
 
+/* ---------- client tokens ---------- */
+
+function routeChecklist(selected) {
+  const set = new Set(selected || []);
+  if (!state.tokenRoutes.length) {
+    return '<span class="muted">暂无路由，请先在配置页添加</span>';
+  }
+  return state.tokenRoutes.map((r) =>
+    '<label class="check-row"><input type="checkbox" value="' + esc(r) + '"' +
+    (set.has(r) ? " checked" : "") + "> " + esc(r) + "</label>").join("");
+}
+
+async function loadTokens() {
+  try {
+    const data = await api("GET", "api/tokens");
+    state.tokens = data.tokens || [];
+    state.tokenRoutes = data.routes || [];
+    state.tokenLoaded = true;
+    renderTokens();
+  } catch (err) {
+    $("#token-result").textContent = "加载失败: " + err.message;
+  }
+}
+
+function renderTokens() {
+  const tbody = $("#tokens-table tbody");
+  if (!state.tokens.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无 Token</td></tr>';
+    return;
+  }
+  tbody.innerHTML = state.tokens.map((t) => {
+    const route = (t.routes && t.routes.length)
+      ? esc(t.routes.join(", "))
+      : '<span class="muted">全部</span>';
+    const status = t.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill err">禁用</span>';
+    const secret = t.token_set
+      ? '<span class="mono">已设置 ' + esc(t.token_hint || "") + "</span>"
+      : '<span class="muted">未设置</span>';
+    const actions = state.role === "admin"
+      ? '<button class="small" data-act="edit" data-index="' + t.index + '">编辑</button> ' +
+        '<button class="small danger" data-act="del" data-index="' + t.index + '">删除</button>'
+      : "";
+    return "<tr><td>" + esc(t.name || "（未命名）") + "</td><td>" + route + "</td><td>" +
+      status + "</td><td>" + secret + "</td><td>" + actions + "</td></tr>";
+  }).join("");
+}
+
+function tokenFormOpen(index) {
+  state.tokenEdit = index;
+  const t = index >= 0 ? state.tokens.find((x) => x.index === index) : null;
+  $("#token-dialog-title").textContent = t ? "编辑 Token" : "新建 Token";
+  $("#token-index").value = index;
+  $("#token-name").value = t ? t.name : "";
+  $("#token-routes").innerHTML = routeChecklist(t ? t.routes : []);
+  $("#token-value").value = "";
+  $("#token-value").disabled = false;
+  $("#token-enabled").checked = t ? t.enabled : true;
+  $("#token-generate").checked = false;
+  $("#token-hint").textContent = t
+    ? "Token 留空表示保持不变；勾选“重新生成”会生成新值。"
+    : "Token 留空会自动生成一个随机值，保存后只显示一次。";
+  $("#token-dialog").showModal();
+  $("#token-name").focus();
+}
+
+function tokenFormClose() {
+  $("#token-dialog").close();
+  state.tokenEdit = -1;
+}
+
+function showNewToken(tok) {
+  const el = $("#token-result");
+  el.textContent = "";
+  if (!tok) return;
+  const label = document.createElement("span");
+  label.textContent = "新 Token（仅显示一次）：";
+  const code = document.createElement("code");
+  code.textContent = tok;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "secondary small";
+  btn.textContent = "复制";
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(tok);
+      btn.textContent = "已复制";
+    } catch {
+      btn.textContent = "请手动复制";
+    }
+  });
+  el.append(label, code, btn);
+}
+
+async function saveToken(e) {
+  e.preventDefault();
+  const index = Number($("#token-index").value);
+  const body = {
+    name: $("#token-name").value.trim(),
+    routes: [...document.querySelectorAll("#token-routes input:checked")].map((el) => el.value),
+    token: $("#token-value").value,
+    enabled: $("#token-enabled").checked,
+    generate: $("#token-generate").checked,
+  };
+  try {
+    const rep = index >= 0
+      ? await api("PUT", "api/tokens/" + index, body)
+      : await api("POST", "api/tokens", body);
+    tokenFormClose();
+    await loadTokens();
+    showNewToken(rep.token);
+    if (!rep.token) $("#token-result").textContent = "已保存";
+  } catch (err) {
+    $("#token-hint").textContent = "保存失败: " + err.message;
+  }
+}
+
+async function tokenAction(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const index = Number(btn.dataset.index);
+  if (btn.dataset.act === "edit") {
+    tokenFormOpen(index);
+    return;
+  }
+  if (btn.dataset.act === "del") {
+    if (!(await uiConfirm("删除 Token", "使用该 Token 的客户端会立即断开。确认删除？", { danger: true, okText: "删除" }))) return;
+    try {
+      await api("DELETE", "api/tokens/" + index);
+      await loadTokens();
+      $("#token-result").textContent = "已删除";
+    } catch (err) {
+      $("#token-result").textContent = "删除失败: " + err.message;
+    }
+  }
+}
+
+/* ---------- ip access ---------- */
+
+function parseIPLines(value) {
+  return value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+async function loadIPAccess() {
+  try {
+    const data = await api("GET", "api/ip-access");
+    $("#ip-whitelist").value = (data.whitelist || []).join("\n");
+    $("#ip-blacklist").value = (data.blacklist || []).join("\n");
+    $("#ip-client").textContent = data.client_ip || "-";
+    $("#ip-result").textContent = "";
+  } catch (err) {
+    $("#ip-result").textContent = "加载失败: " + err.message;
+  }
+}
+
+async function saveIPAccess(e) {
+  e.preventDefault();
+  try {
+    const data = await api("PUT", "api/ip-access", {
+      whitelist: parseIPLines($("#ip-whitelist").value),
+      blacklist: parseIPLines($("#ip-blacklist").value),
+    });
+    $("#ip-client").textContent = data.client_ip || "-";
+    $("#ip-result").textContent = "已保存";
+  } catch (err) {
+    $("#ip-result").textContent = "保存失败: " + err.message;
+  }
+}
+
+/* ---------- shared dialogs ---------- */
+
+function openDialog(opts) {
+  return new Promise((resolve) => {
+    const dlg = $("#app-dialog");
+    const form = $("#app-dialog-form");
+    const input = $("#app-dialog-input");
+    const ok = $("#app-dialog-ok");
+    $("#app-dialog-title").textContent = opts.title || "";
+    const message = $("#app-dialog-message");
+    message.textContent = opts.message || "";
+    message.classList.toggle("hidden", !opts.message);
+    input.classList.toggle("hidden", !opts.input);
+    input.type = opts.password ? "password" : "text";
+    input.value = "";
+    input.placeholder = opts.placeholder || "";
+    ok.textContent = opts.okText || "确定";
+    ok.classList.toggle("danger", !!opts.danger);
+    $("#app-dialog-cancel").classList.toggle("hidden", !!opts.hideCancel);
+
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      form.onsubmit = null;
+      dlg.oncancel = null;
+      dlg.close();
+      resolve(value);
+    };
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      finish(opts.input ? input.value : true);
+    };
+    $("#app-dialog-cancel").onclick = () => finish(null);
+    dlg.oncancel = (event) => {
+      event.preventDefault();
+      finish(null);
+    };
+    dlg.showModal();
+    if (opts.input) setTimeout(() => input.focus(), 0);
+  });
+}
+
+async function uiConfirm(title, message, opts) {
+  const o = opts || {};
+  return (await openDialog({
+    title, message,
+    okText: o.okText || "确定",
+    danger: o.danger,
+  })) === true;
+}
+
+async function uiAlert(title, message) {
+  await openDialog({ title, message, okText: "知道了", hideCancel: true });
+}
+
+async function uiPrompt(title, message, placeholder, password) {
+  const value = await openDialog({ title, message, input: true, placeholder, password, okText: "确定" });
+  return typeof value === "string" ? value : null;
+}
+
+/* ---------- user menu ---------- */
+
+function setUserMenu(open) {
+  $("#user-menu-panel").classList.toggle("hidden", !open);
+  $("#user-menu-toggle").setAttribute("aria-expanded", String(open));
+}
+
+function initUserMenu() {
+  $("#user-menu-toggle").addEventListener("click", () =>
+    setUserMenu($("#user-menu-panel").classList.contains("hidden")));
+  document.addEventListener("click", (e) => {
+    if (!$("#user-menu").contains(e.target)) setUserMenu(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setUserMenu(false);
+  });
+}
+
 /* ---------- users ---------- */
 
 async function loadUsers() {
@@ -591,7 +955,7 @@ async function userAction(act, id, extra) {
   const out = $("#user-result");
   try {
     if (act === "pass") {
-      const pw = prompt("新密码(至少 8 位):");
+      const pw = await uiPrompt("修改密码", "请输入新密码（至少 8 位）。", "新密码", true);
       if (!pw) return;
       await api("PUT", "api/users/" + id, { password: pw });
       out.textContent = "密码已修改";
@@ -599,7 +963,7 @@ async function userAction(act, id, extra) {
       await api("PUT", "api/users/" + id, { enabled: extra === "0" });
       out.textContent = extra === "0" ? "用户已启用" : "用户已禁用";
     } else if (act === "del") {
-      if (!confirm("确认删除该用户?")) return;
+      if (!(await uiConfirm("删除用户", "确认删除该用户？此操作不可撤销。", { danger: true, okText: "删除" }))) return;
       await api("DELETE", "api/users/" + id);
       out.textContent = "用户已删除";
     }
@@ -635,7 +999,12 @@ $("#login-form").addEventListener("submit", doLogin);
 ["login-user", "login-pass"].forEach((id) => {
   $("#" + id).addEventListener("input", () => { $("#login-error").textContent = ""; });
 });
-$("#logout-btn").addEventListener("click", doLogout);
+$("#logout-btn").addEventListener("click", () => {
+  setUserMenu(false);
+  doLogout();
+});
+$("#restart-btn").addEventListener("click", restartClient);
+initUserMenu();
 $("#cfg-save").addEventListener("click", saveConfig);
 $("#cfg-mode-form").addEventListener("click", () => setConfigMode("form"));
 $("#cfg-mode-yaml").addEventListener("click", () => setConfigMode("yaml"));
@@ -644,6 +1013,22 @@ $("#cfg-reload").addEventListener("click", () => {
   loadConfig();
 });
 $("#cfg-form").addEventListener("click", configFormAction);
+$("#cfg-subtabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-cfg-section]");
+  if (btn) selectConfigSection(btn.dataset.cfgSection);
+});
+$("#token-add").addEventListener("click", () => tokenFormOpen(-1));
+$("#token-cancel").addEventListener("click", tokenFormClose);
+$("#token-dialog").addEventListener("close", () => { state.tokenEdit = -1; });
+$("#token-form").addEventListener("submit", saveToken);
+$("#token-generate").addEventListener("change", () => {
+  const generate = $("#token-generate").checked;
+  $("#token-value").disabled = generate;
+  if (generate) $("#token-value").value = "";
+});
+$("#tokens-table").addEventListener("click", tokenAction);
+$("#ip-form").addEventListener("submit", saveIPAccess);
+$("#ip-reload").addEventListener("click", loadIPAccess);
 $("#user-form").addEventListener("submit", createUser);
 document.querySelectorAll(".tab").forEach((b) =>
   b.addEventListener("click", () => switchTab(b.dataset.tab)));

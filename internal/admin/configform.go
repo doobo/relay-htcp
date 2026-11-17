@@ -131,6 +131,14 @@ func applyConfigForm(p Provider, values map[string]any) (string, error) {
 									continue
 								}
 							}
+							// An unchecked bool in a table cell means "not
+							// set", not an explicit false: optional per-row
+							// flags then keep inheriting the global default.
+							if col.Type == FormBool {
+								if b, ok := conv.(bool); ok && !b {
+									continue
+								}
+							}
 							nr[col.Path] = conv
 						}
 					}

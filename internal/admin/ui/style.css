@@ -105,7 +105,12 @@ html[data-theme="black"] {
   scrollbar-width: thin;
 }
 
-html { -webkit-text-size-adjust: 100%; }
+html {
+  -webkit-text-size-adjust: 100%;
+  /* Reserve the vertical scrollbar gutter so tab/page height changes never
+     flash a scrollbar and shift the layout horizontally. */
+  scrollbar-gutter: stable;
+}
 
 body {
   margin: 0;
@@ -254,6 +259,50 @@ code, kbd, pre { font-family: var(--mono); }
   flex: none;
 }
 
+/* Username + logout merged into one dropdown. */
+.user-menu { position: relative; }
+.user-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.user-menu-toggle:hover {
+  background: var(--panel-alt);
+  border-color: var(--border-strong);
+}
+.user-menu-toggle .caret { font-size: 10px; color: var(--muted); }
+.user-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px var(--shadow-lg);
+}
+.user-menu-panel button {
+  width: 100%;
+  padding: 9px 12px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-align: left;
+}
+.user-menu-panel button:hover { background: var(--panel-alt); }
+.user-menu-panel button.danger { background: none; color: var(--danger); }
+.user-menu-panel button.danger:hover { background: var(--danger-soft); }
+
 .theme-select {
   padding: 6px 8px;
   background: var(--panel-alt);
@@ -267,26 +316,61 @@ code, kbd, pre { font-family: var(--mono); }
 
 .tabs {
   display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 4px;
   padding: 0 16px;
-  border-bottom: 1px solid var(--border);
   background: var(--panel);
   overflow-x: auto;
+  /* overflow-y must be hidden: with overflow-x:auto the computed overflow-y
+     becomes auto, and the 1px :active shift/focus ring of a tab creates a
+     stray scrollbar at the right edge that disappears on mouse-up. */
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
+.tabs::-webkit-scrollbar { display: none; }
 .tabs button {
   flex: 0 0 auto;
   background: none;
   border: none;
   border-radius: 0;
-  border-bottom: 2px solid transparent;
   color: var(--muted);
   padding: 11px 14px;
   font-size: 14px;
+  transform: none;
 }
 .tabs button:hover { background: none; color: var(--text); }
+.tabs button:active { transform: none; }
+.tabs button:focus-visible { outline-offset: -2px; }
 .tabs button.active {
   color: var(--text);
-  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Sub-tabs inside the config page (client: servers / listeners / tunnel). */
+.sub-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.sub-tabs::-webkit-scrollbar { display: none; }
+.sub-tabs button {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--muted);
+  padding: 8px 12px;
+  transform: none;
+}
+.sub-tabs button:hover { background: none; color: var(--text); }
+.sub-tabs button:active { transform: none; }
+.sub-tabs button:focus-visible { outline-offset: -2px; }
+.sub-tabs button.active {
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -533,6 +617,114 @@ tbody tr:hover { background: var(--row-hover); }
 .form-table td { padding: 6px; }
 .form-table td input { width: 100%; min-width: 110px; }
 .form-table-wrap > button { align-self: flex-start; }
+
+/* --------------------------------------------------------------- tokens */
+
+.token-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+.token-fields .form-row { gap: 6px; }
+.route-field { grid-column: 1 / -1; }
+.route-checklist {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 4px 12px;
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.route-checklist .check-row { font-size: 12px; color: var(--muted); }
+.token-checks { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+#token-hint { margin: 0; min-height: 1.2em; }
+
+.token-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.token-result:empty { display: none; }
+.token-result code {
+  padding: 4px 8px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  user-select: all;
+  word-break: break-all;
+}
+.mono { font-family: var(--mono); font-size: 12.5px; }
+
+/* ---------------------------------------------------------- ip access */
+
+.ip-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.ip-form .form-row { gap: 6px; }
+.ip-form textarea {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.ip-actions { grid-column: 1 / -1; display: flex; gap: 8px; }
+#ip-result { grid-column: 1 / -1; margin: 0; min-height: 1.2em; }
+
+/* ------------------------------------------------------------- dialogs */
+
+dialog.dialog {
+  width: min(560px, 92vw);
+  max-height: 88vh;
+  padding: 0;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px var(--shadow-lg);
+}
+dialog.dialog[open] { display: flex; flex-direction: column; }
+dialog.dialog::backdrop {
+  background: rgba(6, 9, 16, 0.62);
+  backdrop-filter: blur(2px);
+}
+.dialog-form { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.dialog-head { flex: 0 0 auto; padding: 20px 20px 0; }
+.dialog-head h3 { margin: 0; font-size: 15px; }
+.dialog-body {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 10px;
+  align-content: start;
+  min-height: 0;
+  padding: 12px 20px;
+  overflow-y: auto;
+}
+.dialog-body p { margin: 0; }
+.dialog-message { color: var(--muted); font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.dialog-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding: 12px 20px 20px;
+  border-top: 1px solid var(--border);
+}
+#app-dialog-input { width: 100%; }
+#token-hint { color: var(--muted); font-size: 12px; }
 
 /* --------------------------------------------------------------- users */
 

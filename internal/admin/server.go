@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +40,10 @@ type Options struct {
 	// Allowlist restricts panel access by client IP. nil allows everyone.
 	// Shared-port deployments should always set it.
 	Allowlist *IPAllowlist
+	// Restart, when set, lets the panel restart the running process (used by
+	// the tunnel client). It should return quickly: the handler acknowledges
+	// the request and runs it asynchronously after a short delay.
+	Restart func()
 }
 
 func (o *Options) finalize() {
@@ -67,7 +72,11 @@ type Server struct {
 	ui         http.Handler
 	allowlist  *IPAllowlist
 	challenges *challengeStore
+	ipRules    atomic.Pointer[ipRules]
 	started    time.Time
+	// configMu serializes read-modify-write updates of the config YAML
+	// (form saves and token CRUD).
+	configMu sync.Mutex
 
 	mu  sync.Mutex
 	srv *http.Server
@@ -77,7 +86,7 @@ type Server struct {
 // described by provider. ui may be nil (API only).
 func NewServer(store *Store, provider Provider, opts Options, ui http.Handler, log *slog.Logger) *Server {
 	opts.finalize()
-	return &Server{
+	a := &Server{
 		store:      store,
 		provider:   provider,
 		opts:       opts,
@@ -88,10 +97,21 @@ func NewServer(store *Store, provider Provider, opts Options, ui http.Handler, l
 		challenges: newChallengeStore(),
 		started:    time.Now(),
 	}
+	if settings, err := store.LoadIPAccess(); err != nil {
+		log.Warn("load ip access rules, using empty rules", "err", err)
+	} else if rules, perr := parseIPAccess(settings); perr != nil {
+		log.Warn("invalid saved ip access rules, using empty rules", "err", perr)
+	} else {
+		a.ipRules.Store(rules)
+	}
+	return a
 }
 
 // Store exposes the underlying store (used by main for seeding).
 func (a *Server) Store() *Store { return a.store }
+
+// Allowlist exposes the panel IP allowlist (nil means unrestricted).
+func (a *Server) Allowlist() *IPAllowlist { return a.allowlist }
 
 // Handler assembles the admin HTTP handler tree:
 //
@@ -103,10 +123,17 @@ func (a *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/auth/me", a.handleMe)
 	api.HandleFunc("POST /api/auth/logout", a.handleLogout)
 	api.HandleFunc("GET /api/status", a.handleStatus)
+	api.HandleFunc("POST /api/restart", requireWrite(a.handleRestart))
 	api.HandleFunc("GET /api/config", a.handleGetConfig)
 	api.HandleFunc("PUT /api/config", requireWrite(a.handlePutConfig))
 	api.HandleFunc("GET /api/config/form", a.handleGetConfigForm)
 	api.HandleFunc("PUT /api/config/form", requireWrite(a.handlePutConfigForm))
+	api.HandleFunc("GET /api/tokens", a.handleListTokens)
+	api.HandleFunc("POST /api/tokens", requireWrite(a.handleCreateToken))
+	api.HandleFunc("PUT /api/tokens/{index}", requireWrite(a.handleUpdateToken))
+	api.HandleFunc("DELETE /api/tokens/{index}", requireWrite(a.handleDeleteToken))
+	api.HandleFunc("GET /api/ip-access", a.handleGetIPAccess)
+	api.HandleFunc("PUT /api/ip-access", requireWrite(a.handlePutIPAccess))
 	api.HandleFunc("GET /api/users", a.handleListUsers)
 	api.HandleFunc("POST /api/users", requireWrite(a.handleCreateUser))
 	api.HandleFunc("PUT /api/users/{id}", requireWrite(a.handleUpdateUser))
@@ -131,8 +158,21 @@ func (a *Server) Handler() http.Handler {
 			http.Redirect(w, r, u.RequestURI(), http.StatusTemporaryRedirect)
 		})
 		outer.Handle(prefix+"/", http.StripPrefix(prefix, root))
+		// Standalone mode: the listener root is the panel's front page, so it
+		// lands on the login view instead of a 404. In shared mode the tunnel
+		// only forwards the prefix, so the decoy page still owns "/".
+		outer.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+			u := *r.URL
+			u.Path = prefix + "/"
+			http.Redirect(w, r, u.RequestURI(), http.StatusTemporaryRedirect)
+		})
 		h = outer
 	}
+	h = a.ipAccess(h)
 	return a.allowlist.Wrap(h)
 }
 
@@ -262,7 +302,11 @@ func (a *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r.Header.Get("X-Forwarded-For"), r.RemoteAddr)
+	addr := requestIP(r)
+	ip := addr.String()
+	if !addr.IsValid() {
+		ip = r.RemoteAddr
+	}
 	if !a.limiter.Allow(ip) {
 		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try later")
 		return
@@ -331,6 +375,22 @@ func (a *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// handleRestart acknowledges a restart request and triggers it shortly after,
+// so the HTTP response can be flushed before the process tears down.
+func (a *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if a.opts.Restart == nil {
+		writeError(w, http.StatusNotImplemented, "restart is not supported by this role")
+		return
+	}
+	id, _ := identityFrom(r)
+	a.log.Info("restart requested via admin panel", "user", id.user.Username)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "restarting"})
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		a.opts.Restart()
+	}()
+}
+
 // --- config -----------------------------------------------------------------
 
 func (a *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -345,6 +405,8 @@ type configRequest struct {
 }
 
 func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
 	var req configRequest
 	if err := decodeJSON(r, 1<<20, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -395,6 +457,8 @@ type configFormRequest struct {
 // secret values keep their stored value, so the browser never has to receive
 // (or resubmit) a cleartext credential.
 func (a *Server) handlePutConfigForm(w http.ResponseWriter, r *http.Request) {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
 	var req configFormRequest
 	if err := decodeJSON(r, 1<<20, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

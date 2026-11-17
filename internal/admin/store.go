@@ -61,6 +61,11 @@ func OpenWithKey(path, keyPath string) (*Store, error) {
 }
 
 func openAt(abs, keyPath string) (*Store, error) {
+	if dir := filepath.Dir(abs); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create database directory %s: %w", dir, err)
+		}
+	}
 	w, err := sql.Open("sqlite", dsn(abs, false))
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", abs, err)

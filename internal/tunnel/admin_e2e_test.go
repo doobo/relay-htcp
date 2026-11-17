@@ -175,8 +175,8 @@ routes:
 		t.Fatal("saved config missing route echo2")
 	}
 
-	// 6b. Structured form: the schema-driven editor never returns secrets and
-	// resubmitting a masked secret keeps the stored token.
+	// 6b. Structured form: tokens moved to their own page, and the form save
+	// must not disturb the token that still authenticates this client.
 	code, form := do(http.MethodGet, "/api/config/form", token, nil)
 	if code != http.StatusOK {
 		t.Fatalf("get config form: %d", code)
@@ -188,11 +188,23 @@ routes:
 	if values == nil || values["listen"] == "" {
 		t.Fatalf("form values = %v", values)
 	}
-	tokenRows, _ := values["auth.tokens"].([]any)
-	if len(tokenRows) != 1 || tokenRows[0].(map[string]any)["token"] != "" {
-		t.Fatalf("form token rows = %v", tokenRows)
+	if _, ok := values["auth.tokens"]; ok {
+		t.Fatal("client tokens should no longer be part of the config form")
 	}
-	// Change a scalar, then submit the masked rows back unchanged.
+
+	// The dedicated token page returns the row but masks the secret.
+	code, tokensOut := do(http.MethodGet, "/api/tokens", token, nil)
+	if code != http.StatusOK {
+		t.Fatalf("list tokens: %d %v", code, tokensOut)
+	}
+	if strings.Contains(fmt.Sprint(tokensOut), testToken) {
+		t.Fatal("token list leaked the secret")
+	}
+	if rows, _ := tokensOut["tokens"].([]any); len(rows) != 1 {
+		t.Fatalf("token list = %v", tokensOut)
+	}
+
+	// Change a scalar, then submit the form back unchanged.
 	values["disguise.enabled"] = false
 	code, out = do(http.MethodPut, "/api/config/form", token, map[string]any{"values": values})
 	if code != http.StatusOK {
@@ -202,7 +214,7 @@ routes:
 		t.Fatal("form save did not hot-apply disguise.enabled")
 	}
 	if c := dataStatus("echo2"); c != http.StatusOK {
-		t.Fatalf("masked token was lost by form save: echo2 = %d", c)
+		t.Fatalf("token was lost by form save: echo2 = %d", c)
 	}
 	formSaved, err := store.GetSetting(admin.ConfigKey)
 	if err != nil {

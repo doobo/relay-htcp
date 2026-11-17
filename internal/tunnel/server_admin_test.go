@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"relay-htcp/internal/admin"
 	"relay-htcp/internal/config"
 )
 
@@ -37,6 +38,36 @@ func containsStr(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestAdminRootRedirectForAllowedIPs(t *testing.T) {
+	s := newSwapTestServer(t)
+	s.MountAdmin("/hidden", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "panel")
+	}))
+	allow, err := admin.ParseIPAllowlist([]string{"127.0.0.0/8", "::1/128"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.EnableAdminRootRedirect(allow)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusTemporaryRedirect || w.Header().Get("Location") != "/hidden/" {
+		t.Fatalf("allowed root = %d %q, want 307 /hidden/", w.Code, w.Header().Get("Location"))
+	}
+
+	// A client outside the allowlist still gets the decoy page, so the public
+	// root does not reveal the admin path.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.9:1234"
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code == http.StatusTemporaryRedirect || strings.Contains(w.Body.String(), "panel") {
+		t.Fatalf("disallowed root leaked the admin panel: %d %q", w.Code, w.Body.String())
+	}
 }
 
 // TestServerConfigHotSwap verifies that ApplyConfigYAML swaps tokens and

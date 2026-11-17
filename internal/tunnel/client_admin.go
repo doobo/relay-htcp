@@ -25,20 +25,28 @@ func (p *Pool) Role() string { return "client" }
 
 // Status implements admin.Provider.
 func (p *Pool) Status() admin.Status {
-	cfg := p.cfgGet()
-	st := admin.Status{Role: "client", Client: &admin.ClientStatus{ServerAddr: cfg.Server}}
-	for i, s := range p.slots {
-		ss := admin.SlotStat{Index: i}
-		if t := s.get(); t != nil {
-			ss.State = slotStateName(t.state.Load())
-			ss.ConnectedAt = t.connectedAt.Load()
-			if !t.closed() {
-				ss.LastPongAt = time.Unix(0, t.lastPong.Load()).UnixMilli()
-			}
-		} else {
-			ss.State = admin.SlotStateReconnecting
+	st := admin.Status{Role: "client", Client: &admin.ClientStatus{}}
+	for _, srv := range p.servers {
+		if st.Client.ServerAddr == "" {
+			st.Client.ServerAddr = srv.url
 		}
-		st.Client.Slots = append(st.Client.Slots, ss)
+		st.Client.Servers = append(st.Client.Servers, admin.ServerStat{
+			Name: srv.name, URL: srv.url, Transport: srv.transport,
+			Online: srv.online(), Total: len(srv.slots),
+		})
+		for i, s := range srv.slots {
+			ss := admin.SlotStat{Server: srv.name, Index: i}
+			if t := s.get(); t != nil {
+				ss.State = slotStateName(t.state.Load())
+				ss.ConnectedAt = t.connectedAt.Load()
+				if !t.closed() {
+					ss.LastPongAt = time.Unix(0, t.lastPong.Load()).UnixMilli()
+				}
+			} else {
+				ss.State = admin.SlotStateReconnecting
+			}
+			st.Client.Slots = append(st.Client.Slots, ss)
+		}
 	}
 	p.lmu.Lock()
 	for _, ls := range p.listeners {
@@ -46,13 +54,14 @@ func (p *Pool) Status() admin.Status {
 		cons := make([]admin.ConnStat, 0, len(ls.active))
 		for ac := range ls.active {
 			cons = append(cons, admin.ConnStat{
-				Local: ac.local, From: ac.from, Route: ac.route, StartedAt: ac.startedAt,
-				BytesIn: ac.bytesIn.Load(), BytesOut: ac.bytesOut.Load(),
+				Local: ac.local, From: ac.from, Route: ac.route, Server: ac.server,
+				StartedAt: ac.startedAt, BytesIn: ac.bytesIn.Load(), BytesOut: ac.bytesOut.Load(),
 			})
 		}
 		ls.mu.Unlock()
 		st.Client.Listeners = append(st.Client.Listeners, admin.ListenerStat{
-			Local: ls.local, Target: ls.target, ActiveConns: len(cons),
+			Local: ls.local, Target: ls.target, Servers: append([]string(nil), ls.servers...),
+			Strategy: ls.strategy, ActiveConns: len(cons),
 		})
 		st.Client.ActiveConns = append(st.Client.ActiveConns, cons...)
 	}
@@ -102,8 +111,8 @@ func (p *Pool) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	// never clobber the panel's own settings (listen address, DB path).
 	newCfg.Admin = old.Admin
 	report := admin.SaveReport{}
-	if old.Server != newCfg.Server {
-		report.RestartRequired = append(report.RestartRequired, "server")
+	if !reflect.DeepEqual(old.Servers, newCfg.Servers) {
+		report.RestartRequired = append(report.RestartRequired, "servers")
 	}
 	if old.Auth.Token != newCfg.Auth.Token {
 		report.RestartRequired = append(report.RestartRequired, "auth.token")
@@ -130,7 +139,7 @@ func (p *Pool) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	changed := false
 	for _, l := range newCfg.Listeners {
 		oldL, exists := oldSet[l.Local]
-		if exists && oldL.Target == l.Target {
+		if exists && reflect.DeepEqual(oldL, l) {
 			continue
 		}
 		if exists {
@@ -168,31 +177,52 @@ func (p *Pool) CurrentConfigYAML() string {
 }
 
 // ConfigFormSchema implements admin.Provider. Add a tunable here and it shows
-// up in the panel's structured editor automatically.
+// up in the panel's structured editor automatically. Sections with a Key are
+// rendered as sub-tabs in the client config page.
 func (p *Pool) ConfigFormSchema() admin.FormSchema {
 	return admin.FormSchema{Sections: []admin.FormSection{
 		{
-			Title: "服务端连接",
+			Title: "服务端",
+			Key:   "servers",
 			Fields: []admin.FormField{
-				{Path: "server", Label: "服务端地址", Type: admin.FormText, Placeholder: "https://tunnel.example.com:443", Help: "格式 scheme://host[:port]，不能带路径；修改后需要重启"},
-				{Path: "auth.token", Label: "认证 Token", Type: admin.FormSecret, Placeholder: "留空保持不变", Help: "必须与服务端一致；修改后需要重启"},
-				{Path: "tls.ca_file", Label: "自定义 CA 文件", Type: admin.FormText, Placeholder: "server.crt", Help: "使用自签或私有 CA 时填写；修改后需要重启"},
-				{Path: "tls.insecure_skip_verify", Label: "跳过证书校验（仅测试）", Type: admin.FormBool, Help: "修改后需要重启"},
+				{Path: "servers", Label: "服务端列表", Type: admin.FormTable,
+					Help: "每个服务端独立一条；name 用于本地监听选择，url 形如 https://host:443。修改后需要重启。",
+					Columns: []admin.FormField{
+						{Path: "name", Label: "名称", Type: admin.FormText, Placeholder: "primary"},
+						{Path: "url", Label: "地址", Type: admin.FormText, Placeholder: "https://tunnel.example.com:443"},
+						{Path: "transport", Label: "传输", Type: admin.FormSelect, Options: []string{"http", "xhttp"}},
+						{Path: "xhttp_path", Label: "xhttp 路径", Type: admin.FormText, Placeholder: "/relay"},
+						{Path: "token", Label: "Token（可选）", Type: admin.FormSecret, Placeholder: "留空 = 用全局 Token"},
+						{Path: "ca_file", Label: "CA 文件（可选）", Type: admin.FormText, Placeholder: "留空 = 用全局 CA"},
+						{Path: "insecure_skip_verify", Label: "跳过校验（可选）", Type: admin.FormBool},
+					}},
+				{Path: "auth.token", Label: "全局认证 Token", Type: admin.FormSecret, Placeholder: "留空保持不变",
+					Help: "服务端未单独配置 Token 时使用；修改后需要重启"},
+				{Path: "tls.ca_file", Label: "全局 CA 文件", Type: admin.FormText, Placeholder: "server.crt",
+					Help: "服务端未单独配置 CA 时使用；修改后需要重启"},
+				{Path: "tls.insecure_skip_verify", Label: "全局跳过证书校验（仅测试）", Type: admin.FormBool,
+					Help: "服务端勾选“跳过校验”或这里勾选都会跳过；修改后需要重启"},
 			},
 		},
 		{
 			Title: "本地监听",
+			Key:   "listeners",
 			Fields: []admin.FormField{
-				{Path: "listeners", Label: "监听列表", Type: admin.FormTable, Columns: []admin.FormField{
-					{Path: "local", Label: "本地地址", Type: admin.FormText, Placeholder: "127.0.0.1:2222"},
-					{Path: "target", Label: "服务端路由", Type: admin.FormText, Placeholder: "ssh"},
-				}},
+				{Path: "listeners", Label: "监听列表", Type: admin.FormTable,
+					Help: "servers 留空 = 所有服务端；多个服务端用英文逗号分隔。",
+					Columns: []admin.FormField{
+						{Path: "local", Label: "本地地址", Type: admin.FormText, Placeholder: "127.0.0.1:2222"},
+						{Path: "target", Label: "服务端路由", Type: admin.FormText, Placeholder: "ssh"},
+						{Path: "servers", Label: "选择服务端", Type: admin.FormCSV, Placeholder: "primary, backup"},
+						{Path: "strategy", Label: "选择策略", Type: admin.FormSelect, Options: []string{"round_robin", "failover"}},
+					}},
 			},
 		},
 		{
 			Title: "隧道参数",
+			Key:   "tunnel",
 			Fields: []admin.FormField{
-				{Path: "tunnel.connections", Label: "连接池大小", Type: admin.FormNumber, Help: "需重启"},
+				{Path: "tunnel.connections", Label: "每个服务端的连接池大小", Type: admin.FormNumber, Help: "每个服务端各自建立该数量的连接；需重启"},
 				{Path: "tunnel.heartbeat", Label: "心跳间隔", Type: admin.FormDuration, Placeholder: "15s", Help: "需重启"},
 				{Path: "tunnel.heartbeat_miss", Label: "心跳丢失上限", Type: admin.FormNumber, Help: "连续丢失多少次 PONG 判定断开；需重启"},
 				{Path: "tunnel.reconnect_min", Label: "重连初始退避", Type: admin.FormDuration, Placeholder: "1s", Help: "需重启"},

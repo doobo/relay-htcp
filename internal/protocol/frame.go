@@ -14,6 +14,7 @@
 //	0x1 PING  heartbeat request (client -> server)
 //	0x2 PONG  heartbeat response (server -> client, payload echoes the PING)
 //	0x3 CLOSE graceful close request (payload is an optional reason)
+//	0x4 NOOP  padding; ignored by receivers (flushes CDN response buffers)
 package protocol
 
 import (
@@ -32,6 +33,9 @@ const (
 	TypePing  Type = 0x1
 	TypePong  Type = 0x2
 	TypeClose Type = 0x3
+	// TypeNoop is padding. Receivers ignore it; it exists so CDN/proxy
+	// response buffers are flushed early instead of holding small frames.
+	TypeNoop Type = 0x4
 )
 
 const (
@@ -70,6 +74,8 @@ func (t Type) String() string {
 		return "PONG"
 	case TypeClose:
 		return "CLOSE"
+	case TypeNoop:
+		return "NOOP"
 	default:
 		return fmt.Sprintf("0x%02x", byte(t))
 	}
@@ -118,7 +124,7 @@ func (rd *Reader) Read() (*Frame, error) {
 	}
 	f := &Frame{Type: Type(rd.buf[0])}
 	switch f.Type {
-	case TypeData, TypePing, TypePong, TypeClose:
+	case TypeData, TypePing, TypePong, TypeClose, TypeNoop:
 	default:
 		return nil, ErrInvalidType
 	}

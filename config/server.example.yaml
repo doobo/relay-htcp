@@ -1,7 +1,8 @@
 # relay-htcp server configuration
 
-# Listen address for the public endpoint.
-listen: ":8443"
+# Listen address for the public endpoint. Defaults to :5630 when omitted;
+# the server's -listen / -port flags override it for a single run.
+listen: ":5630"
 
 # TLS certificate. If omitted, the server listens in cleartext (h2c) —
 # intended for LAN use and tests only.
@@ -9,13 +10,17 @@ tls:
   cert: "server.crt"
   key: "server.key"
 
-# Authenticated client identities. A token's `routes` restricts which routes
-# it may use; an empty list allows all routes.
+# Authenticated client identities. A token may reference several routes
+# (multi-select in the admin panel). An empty routes list still means
+# "all routes", which is not recommended.
 auth:
   tokens:
     - name: office-laptop
       token: "change-me-please-0123456789"
       routes: [ssh, mysql]
+    - name: ops
+      token: "another-change-me-0123456789"
+      routes: [mysql]
 
 # Local targets exposed through the tunnel.
 routes:
@@ -29,6 +34,7 @@ tunnel:
   max_connections: 100          # 0 = unlimited
   dial_timeout: 10s             # target dial timeout
   idle_timeout: 90s             # drop a silent control stream
+  xhttp_path: "/relay"          # CDN/xhttp endpoint prefix; /relay avoids colliding with Xray
 
 # Camouflage: decoy page for scanners, nginx-style Server header.
 disguise:
@@ -50,10 +56,10 @@ admin:
   enabled: false
   shared: true
   path: "/admin"                # change to an unguessable prefix in production
-  allowed_cidrs: ["127.0.0.0/8", "::1/128"]
+  allowed_cidrs: ["0.0.0.0/0", "::/0"]  # 默认全部放行；可在“IP 访问”页限制
   # listen: "127.0.0.1:8080"   # standalone mode only
-  db_path: "relay-htcp-admin.db"
-  key_file: "relay-htcp-admin.db.key"  # master key for at-rest encryption; auto-created 0600
+  db_path: "data/admin.db"
+  key_file: "data/admin.db.key"  # master key for at-rest encryption; auto-created 0600
   default_username: "admin"
   default_password: ""        # empty = generate and print once on first run
   session_ttl: 24h

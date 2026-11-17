@@ -51,7 +51,7 @@ func TestProbeTLS(t *testing.T) {
 	doGet("stock", stock)
 
 	scfg := clientProbeConfig(serverAddr)
-	client, err := newSlotClient(scfg)
+	client, err := newSlotClient(serverAddr, scfg.TLS)
 	if err != nil {
 		t.Fatalf("newSlotClient: %v", err)
 	}

@@ -159,3 +159,43 @@ func TestApplyConfigFormRejectsBadDuration(t *testing.T) {
 		t.Fatalf("empty duration should keep the old value: %v", err)
 	}
 }
+
+// An unchecked optional bool inside a table means "not set" so rows keep
+// inheriting the global default instead of writing an explicit false.
+func TestApplyConfigFormOmitsUncheckedTableBool(t *testing.T) {
+	p := &formProvider{
+		yaml: "servers:\n  - name: a\n    url: \"https://a:443\"\n",
+		schema: FormSchema{Sections: []FormSection{{Fields: []FormField{{
+			Path: "servers", Label: "服务端", Type: FormTable,
+			Columns: []FormField{
+				{Path: "name", Label: "名称", Type: FormText},
+				{Path: "insecure_skip_verify", Label: "跳过校验", Type: FormBool},
+			},
+		}}}}},
+	}
+	values := map[string]any{
+		"servers": []any{
+			map[string]any{"_id": float64(0), "name": "a", "insecure_skip_verify": false},
+			map[string]any{"_id": float64(-1), "name": "b", "insecure_skip_verify": true},
+		},
+	}
+	out, err := applyConfigForm(p, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Servers []map[string]any
+	}
+	if err := yaml.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal result: %v\n%s", err, out)
+	}
+	if len(got.Servers) != 2 {
+		t.Fatalf("rows = %+v", got.Servers)
+	}
+	if _, ok := got.Servers[0]["insecure_skip_verify"]; ok {
+		t.Fatalf("unchecked bool was written: %+v", got.Servers[0])
+	}
+	if v, _ := got.Servers[1]["insecure_skip_verify"].(bool); !v {
+		t.Fatalf("checked bool missing: %+v", got.Servers[1])
+	}
+}

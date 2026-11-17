@@ -113,6 +113,9 @@ func (s *Server) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	if old.Disguise.On() != newCfg.Disguise.On() {
 		report.Applied = append(report.Applied, "disguise")
 	}
+	if old.Tunnel.XHTTPPath != newCfg.Tunnel.XHTTPPath {
+		report.Applied = append(report.Applied, "tunnel.xhttp_path")
+	}
 	return report, nil
 }
 
@@ -145,6 +148,7 @@ func (s *Server) ConfigFormSchema() admin.FormSchema {
 				{Path: "tunnel.max_connections", Label: "在线控制连接上限", Type: admin.FormNumber, Help: "0 表示不限制"},
 				{Path: "tunnel.dial_timeout", Label: "内网拨号超时", Type: admin.FormDuration, Placeholder: "10s"},
 				{Path: "tunnel.idle_timeout", Label: "控制流空闲超时", Type: admin.FormDuration, Placeholder: "90s"},
+				{Path: "tunnel.xhttp_path", Label: "xhttp 路径", Type: admin.FormText, Placeholder: "/relay", Help: "默认 /relay，需与客户端 servers[].xhttp_path 一致；避免与 Xray 等服务的 /xhttp 冲突"},
 				{Path: "disguise.enabled", Label: "启用伪装（诱饵页与响应头）", Type: admin.FormBool},
 			},
 		},
@@ -154,16 +158,6 @@ func (s *Server) ConfigFormSchema() admin.FormSchema {
 				{Path: "routes", Label: "路由列表", Type: admin.FormTable, Columns: []admin.FormField{
 					{Path: "name", Label: "路由名", Type: admin.FormText, Placeholder: "ssh"},
 					{Path: "target", Label: "内网目标", Type: admin.FormText, Placeholder: "127.0.0.1:22"},
-				}},
-			},
-		},
-		{
-			Title: "客户端 Token",
-			Fields: []admin.FormField{
-				{Path: "auth.tokens", Label: "Token 列表", Type: admin.FormTable, Columns: []admin.FormField{
-					{Path: "name", Label: "名称", Type: admin.FormText, Placeholder: "office-laptop"},
-					{Path: "token", Label: "Token", Type: admin.FormSecret, Placeholder: "留空保持不变"},
-					{Path: "routes", Label: "允许路由", Type: admin.FormCSV, Placeholder: "ssh, mysql（留空 = 全部）"},
 				}},
 			},
 		},

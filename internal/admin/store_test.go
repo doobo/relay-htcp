@@ -2,6 +2,7 @@ package admin
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -25,6 +26,25 @@ func TestMigrateIdempotent(t *testing.T) {
 	s := openTestStore(t)
 	if err := s.Migrate(); err != nil {
 		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+func TestOpenCreatesDataDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	dbPath := filepath.Join(dir, "admin.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("database not created: %v", err)
+	}
+	if _, err := os.Stat(dbPath + ".key"); err != nil {
+		t.Fatalf("key file not created: %v", err)
 	}
 }
 

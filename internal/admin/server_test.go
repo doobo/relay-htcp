@@ -194,6 +194,39 @@ func TestLoginFlow(t *testing.T) {
 	}
 }
 
+func TestRestartEndpoint(t *testing.T) {
+	called := make(chan struct{}, 1)
+	env := setupEnvWith(t, Options{Restart: func() {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+	}})
+	_, lr := login(t, env.srv, "admin", "adminpass1")
+	code, body := doReq(t, env.srv, http.MethodPost, "/api/restart", lr.Token, nil)
+	if code != http.StatusOK {
+		t.Fatalf("restart = %d %s", code, body)
+	}
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restart callback was not invoked")
+	}
+
+	// Viewers cannot restart.
+	_, vr := login(t, env.srv, "viewer", "viewerpass1")
+	if code, _ := doReq(t, env.srv, http.MethodPost, "/api/restart", vr.Token, nil); code != http.StatusForbidden {
+		t.Fatalf("viewer restart = %d, want 403", code)
+	}
+
+	// Roles without restart support report 501.
+	plain := setupEnv(t)
+	_, pr := login(t, plain.srv, "admin", "adminpass1")
+	if code, _ := doReq(t, plain.srv, http.MethodPost, "/api/restart", pr.Token, nil); code != http.StatusNotImplemented {
+		t.Fatalf("unsupported restart = %d, want 501", code)
+	}
+}
+
 func TestDisabledUserRejected(t *testing.T) {
 	env := setupEnv(t)
 	if err := env.store.UpdateUserEnabled(env.admin.ID, false); err != nil {
@@ -388,6 +421,18 @@ func TestAdminHandlerPrefix(t *testing.T) {
 	}
 	if loc := w.Header().Get("Location"); loc != "/manage-x/" {
 		t.Fatalf("redirect location = %q", loc)
+	}
+
+	// The standalone listener root is the panel front page: it lands on the
+	// login view rather than a 404.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("GET / = %d, want 307", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/manage-x/" {
+		t.Fatalf("root redirect location = %q", loc)
 	}
 
 	for path, want := range map[string]string{

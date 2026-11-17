@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"relay-htcp/internal/admin"
 	"relay-htcp/internal/config"
 	"relay-htcp/internal/disguise"
 	"relay-htcp/internal/protocol"
@@ -25,6 +26,14 @@ const (
 	ControlPath = "/tunnel"
 	DataPath    = "/stream"
 	HealthPath  = "/health"
+
+	// XHTTP transport: split upload/download so ordinary HTTP proxies and
+	// CDNs (Cloudflare etc.) can carry the tunnel without full-duplex
+	// HTTP/2 streaming. The prefix is configurable (tunnel.xhttp_path) and
+	// defaults to /relay.
+	XHTTPPingPath     = config.DefaultXHTTPPath + "/ping"
+	XHTTPDownloadPath = config.DefaultXHTTPPath + "/download"
+	XHTTPUploadPath   = config.DefaultXHTTPPath + "/upload"
 )
 
 // tokenEntry is one authenticated identity with its route permissions.
@@ -81,15 +90,26 @@ type Server struct {
 	listenAddr string
 	st         stats
 	admin      atomic.Pointer[adminMount]
+	// rootToAdmin redirects "/" to the admin panel for clients allowed by
+	// adminAllow. Other clients still get the decoy page.
+	rootToAdmin atomic.Bool
+	adminAllow  *admin.IPAllowlist
+	// listenOverride, when set, pins the bound address for this run and wins
+	// over both the file config and the saved database config.
+	listenOverride string
 
 	mu  sync.Mutex
 	srv *http.Server
+
+	// xhttp transport sessions, keyed by the client-generated session id.
+	xmu       sync.Mutex
+	xsessions map[string]*xhttpSession
 }
 
 // NewServer builds a Server from a validated configuration.
 func NewServer(cfg *config.ServerConfig, log *slog.Logger) *Server {
 	tokens := buildTokens(cfg)
-	s := &Server{log: log}
+	s := &Server{log: log, xsessions: make(map[string]*xhttpSession)}
 	s.cfg.Store(cfg)
 	s.tokens.Store(&tokens)
 	return s
@@ -98,6 +118,9 @@ func NewServer(cfg *config.ServerConfig, log *slog.Logger) *Server {
 func buildTokens(cfg *config.ServerConfig) []tokenEntry {
 	tokens := make([]tokenEntry, 0, len(cfg.Auth.Tokens))
 	for _, t := range cfg.Auth.Tokens {
+		if !t.On() {
+			continue
+		}
 		e := tokenEntry{raw: t.Token, name: t.Name}
 		if len(t.Routes) > 0 {
 			e.routes = make(map[string]bool, len(t.Routes))
@@ -197,6 +220,14 @@ func (s *Server) MountAdmin(prefix string, h http.Handler) {
 	s.admin.Store(&adminMount{prefix: prefix, h: h})
 }
 
+// EnableAdminRootRedirect makes GET / redirect to the mounted panel for
+// clients that pass the admin IP allowlist. Everyone else keeps seeing the
+// decoy page, so the public root does not reveal the admin entry point.
+func (s *Server) EnableAdminRootRedirect(allow *admin.IPAllowlist) {
+	s.adminAllow = allow
+	s.rootToAdmin.Store(true)
+}
+
 // ServeHTTP routes requests.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgGet()
@@ -208,8 +239,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			m.h.ServeHTTP(w, r)
 			return
 		}
+		if s.rootToAdmin.Load() && r.URL.Path == "/" &&
+			(s.adminAllow == nil || s.adminAllow.Allows(r.RemoteAddr)) {
+			u := *r.URL
+			u.Path = m.prefix + "/"
+			http.Redirect(w, r, u.RequestURI(), http.StatusTemporaryRedirect)
+			return
+		}
+	}
+	xhttpBase := config.DefaultXHTTPPath
+	if p, err := config.NormalizeXHTTPPath(cfg.Tunnel.XHTTPPath); err == nil {
+		xhttpBase = p
 	}
 	switch {
+	case r.Method == http.MethodPost && r.URL.Path == xhttpBase+"/ping":
+		s.handleXHTTPPing(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == xhttpBase+"/download":
+		s.handleXHTTPDownload(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == xhttpBase+"/upload":
+		s.handleXHTTPUpload(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == ControlPath:
 		s.handleControl(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == DataPath:
@@ -387,11 +435,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status":"ok","connections":%d,"decoy_views":%d}`, s.conns.Load(), disguise.Views())
 }
 
-// Serve listens on cfg.Listen and serves until ctx is canceled.
+// SetListenOverride pins the listener address for this run. It takes
+// precedence over the YAML file and any config restored from the admin
+// database. Call it before Serve.
+func (s *Server) SetListenOverride(addr string) {
+	s.listenOverride = addr
+}
+
+// Serve listens on cfg.Listen (or the CLI override) and serves until ctx is
+// canceled.
 func (s *Server) Serve(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.cfgGet().Listen)
+	addr := s.listenOverride
+	if addr == "" {
+		addr = s.cfgGet().Listen
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", s.cfgGet().Listen, err)
+		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	return s.ServeListener(ctx, ln)
 }

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 )
 
 // IPAllowlist restricts admin requests to a set of CIDRs. It is used when the
@@ -40,13 +41,19 @@ func (a *IPAllowlist) Allows(remoteAddr string) bool {
 	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		host = h
 	}
-	addr, err := netip.ParseAddr(host)
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
 	if err != nil {
 		return false
 	}
-	addr = addr.Unmap()
+	return a.allowsAddr(addr.Unmap())
+}
+
+func (a *IPAllowlist) allowsAddr(addr netip.Addr) bool {
+	if a == nil {
+		return true
+	}
 	for _, p := range a.prefixes {
-		if p.Contains(addr) {
+		if p.Contains(addr.Unmap()) {
 			return true
 		}
 	}
@@ -59,7 +66,8 @@ func (a *IPAllowlist) Wrap(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !a.Allows(r.RemoteAddr) {
+		ip := requestIP(r)
+		if !ip.IsValid() || !a.allowsAddr(ip) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

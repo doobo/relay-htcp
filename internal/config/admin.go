@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -17,8 +18,8 @@ type AdminConfig struct {
 	// also acts as a cheap obscurity layer; pick something unguessable.
 	Path string `yaml:"path"`
 	// AllowedCIDRs restricts who may reach the panel. Empty means no IP
-	// restriction; shared mode defaults to loopback so the public tunnel port
-	// never exposes the login page by accident.
+	// restriction; shared mode defaults to all addresses (tighten it in the
+	// panel's IP Access page or here).
 	AllowedCIDRs    []string      `yaml:"allowed_cidrs"`
 	Listen          string        `yaml:"listen"`   // standalone mode only
 	Token           string        `yaml:"token"`    // optional static bootstrap token
@@ -35,7 +36,7 @@ func (a *AdminConfig) finalize() {
 		a.Listen = "127.0.0.1:8080"
 	}
 	if a.DBPath == "" {
-		a.DBPath = "relay-htcp-admin.db"
+		a.DBPath = filepath.Join("data", "admin.db")
 	}
 	if a.KeyFile == "" {
 		a.KeyFile = a.DBPath + ".key"
@@ -48,7 +49,9 @@ func (a *AdminConfig) finalize() {
 	}
 	a.Path = normalizeAdminPath(a.Path, a.Shared)
 	if a.Shared && len(a.AllowedCIDRs) == 0 {
-		a.AllowedCIDRs = []string{"127.0.0.0/8", "::1/128"}
+		// Default-open: the login is still protected by password + encrypted
+		// login, and the panel's IP Access page can tighten this at runtime.
+		a.AllowedCIDRs = []string{"0.0.0.0/0", "::/0"}
 	}
 }
 

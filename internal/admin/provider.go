@@ -34,7 +34,10 @@ type FormSchema struct {
 
 // FormSection groups related fields.
 type FormSection struct {
-	Title  string      `json:"title"`
+	Title string `json:"title"`
+	// Key, when set on client sections, renders the section as a sub-tab in
+	// the config page (e.g. "servers" / "listeners").
+	Key    string      `json:"key,omitempty"`
 	Fields []FormField `json:"fields"`
 }
 
@@ -115,10 +118,21 @@ type StreamStat struct {
 
 // ClientStatus is the live state of a tunnel client.
 type ClientStatus struct {
+	// ServerAddr is the first server URL, kept for older front-ends.
 	ServerAddr  string         `json:"server_addr"`
+	Servers     []ServerStat   `json:"servers"`
 	Slots       []SlotStat     `json:"slots"`
 	Listeners   []ListenerStat `json:"listeners"`
 	ActiveConns []ConnStat     `json:"active_conns"`
+}
+
+// ServerStat is one configured tunnel server and its pool state.
+type ServerStat struct {
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	Transport string `json:"transport"`
+	Online    int    `json:"online"`
+	Total     int    `json:"total"`
 }
 
 // SlotState is a pool slot lifecycle state.
@@ -132,6 +146,7 @@ const (
 
 // SlotStat is one tunnel pool connection.
 type SlotStat struct {
+	Server      string    `json:"server"`
 	Index       int       `json:"index"`
 	State       SlotState `json:"state"`
 	ConnectedAt int64     `json:"connected_at,omitempty"`
@@ -140,9 +155,11 @@ type SlotStat struct {
 
 // ListenerStat is one local listener.
 type ListenerStat struct {
-	Local       string `json:"local"`
-	Target      string `json:"target"`
-	ActiveConns int    `json:"active_conns"`
+	Local       string   `json:"local"`
+	Target      string   `json:"target"`
+	Servers     []string `json:"servers"`
+	Strategy    string   `json:"strategy"`
+	ActiveConns int      `json:"active_conns"`
 }
 
 // ConnStat is one active local connection through the tunnel.
@@ -150,6 +167,7 @@ type ConnStat struct {
 	Local     string `json:"local"`
 	From      string `json:"from"`
 	Route     string `json:"route"`
+	Server    string `json:"server"`
 	StartedAt int64  `json:"started_at"`
 	BytesIn   int64  `json:"bytes_in"`
 	BytesOut  int64  `json:"bytes_out"`

@@ -1,24 +1,47 @@
 # relay-htcp client configuration
 
-# Server address (scheme://host[:port], no path). https = TLS, http = h2c.
-server: "https://tunnel.example.com:443"
+# Global defaults. Each servers[] entry may override token and CA.
+auth:
+  token: "change-me-please-0123456789"
 
 tls:
   insecure_skip_verify: false   # true only for self-signed certificates
   ca_file: ""                   # optional custom CA bundle (PEM)
 
-auth:
-  token: "change-me-please-0123456789"
+# One or more tunnel servers. Each server gets its own connection pool.
+servers:
+  - name: primary
+    url: "https://tunnel.example.com:443"
+    transport: http             # http = direct end-to-end HTTP/2; xhttp = CDN/Cloudflare
+    # token: ""                 # empty = auth.token
+    # ca_file: ""               # empty = tls.ca_file
+    # insecure_skip_verify: false
+  # - name: cloudflare
+  #   url: "https://ws.example.com"
+  #   transport: xhttp          # split upload POST + download GET; works behind CDN
+  #   xhttp_path: "/relay"      # must match the server's tunnel.xhttp_path
+  #   token: "another-token"    # optional per-server token
 
-# Local ports mapped to server-side routes.
+# Legacy single-server form is still accepted and migrated on load:
+# server: "https://tunnel.example.com:443"
+
+# Local ports mapped to server-side routes. A listener may select one or more
+# servers and a strategy:
+#   failover     = always use the first selected server; fall back to the next
+#                  one when it is unreachable or a stream cannot be opened
+#   round_robin  = rotate over the selected servers
 listeners:
   - local: "127.0.0.1:2222"
     target: "ssh"
+    servers: [primary]
+    strategy: failover
   - local: "127.0.0.1:33060"
     target: "mysql"
+    servers: [primary]          # empty = all configured servers
+    strategy: round_robin
 
 tunnel:
-  connections: 2          # independent tunnel connections (pool)
+  connections: 2          # per server: independent tunnel connections
   heartbeat: 15s          # PING interval
   heartbeat_miss: 3       # consecutive missed PONGs before reconnect
   reconnect_min: 1s
@@ -43,8 +66,8 @@ admin:
   enabled: false
   path: "/admin"
   listen: "127.0.0.1:8081"
-  db_path: "relay-htcp-admin.db"
-  key_file: "relay-htcp-admin.db.key"  # master key for at-rest encryption; auto-created 0600
+  db_path: "data/admin.db"
+  key_file: "data/admin.db.key"  # master key for at-rest encryption; auto-created 0600
   default_username: "admin"
   default_password: ""        # empty = generate and print once on first run
   session_ttl: 24h
