@@ -34,6 +34,12 @@ func TestHandlerServesAssets(t *testing.T) {
 	if !strings.Contains(string(mustRead(t, h, "/")), "restart-btn") {
 		t.Fatal("index.html is missing the restart button")
 	}
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("app.js Cache-Control = %q, want no-store", cc)
+	}
 }
 
 func mustRead(t *testing.T, h http.Handler, path string) []byte {

@@ -18,6 +18,14 @@ func Handler() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(sub))
 	mux := http.NewServeMux()
-	mux.Handle("/", fileServer)
+	// The assets are embedded in the binary and change on every upgrade, but
+	// they have no ETag/Last-Modified metadata. Force clients to revalidate so
+	// an old app.js cannot hide newly added pages (for example the proxy tab).
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		fileServer.ServeHTTP(w, r)
+	}))
 	return mux
 }
