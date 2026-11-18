@@ -212,7 +212,7 @@ func TestBootstrapClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Admin.Enabled || cfg.Admin.Listen != "127.0.0.1:8081" {
+	if !cfg.Admin.Enabled || cfg.Admin.Listen != "127.0.0.1:15630" {
 		t.Fatalf("admin = %+v", cfg.Admin)
 	}
 	if len(cfg.Servers) != 0 || len(cfg.Listeners) != 0 {

@@ -67,7 +67,7 @@ Server config is optional: server.yaml is used when present, otherwise built-in
 defaults are used (admin panel on /admin, database in ./data/admin.db).
 Client config is optional too: data/client.yaml is used when present (then
 ./client.yaml), otherwise a bootstrap config is created in data/client.yaml
-with the admin panel on 127.0.0.1:8081.
+with the admin panel on 127.0.0.1:15630.
 Server listen defaults to :5630 when the config omits "listen".
 -listen and -port override both the file and the saved database config.`)
 }
@@ -266,7 +266,7 @@ func runClient(args []string) {
 	}
 	if created {
 		newLogger("info").Info("no client config found, created bootstrap config",
-			"path", resolved, "admin", "http://127.0.0.1:8081/admin/")
+			"path", resolved, "admin", "http://127.0.0.1:15630/admin/")
 	}
 
 	// The admin panel can request a restart. Reinitialize everything in

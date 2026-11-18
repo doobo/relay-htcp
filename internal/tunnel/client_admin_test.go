@@ -174,7 +174,7 @@ func TestPoolApplyConfigKeepsAdminSection(t *testing.T) {
 		Server:  "http://127.0.0.1:1",
 		Auth:    config.ClientAuth{Token: testToken},
 		Listeners: []config.Listener{{Local: l1, Target: "echo"}},
-		Admin:   config.AdminConfig{Enabled: true, Listen: "127.0.0.1:8081"},
+		Admin:   config.AdminConfig{Enabled: true, Listen: "127.0.0.1:15630"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestPoolApplyConfigKeepsAdminSection(t *testing.T) {
 	defer pool.StopAllListeners()
 
 	applyClientYAML(t, pool, "http://127.0.0.1:1", [2]string{l1, "echo"})
-	if out := pool.CurrentConfigYAML(); !strings.Contains(out, "127.0.0.1:8081") {
+	if out := pool.CurrentConfigYAML(); !strings.Contains(out, "127.0.0.1:15630") {
 		t.Fatalf("admin section clobbered by apply:\n%s", out)
 	}
 }

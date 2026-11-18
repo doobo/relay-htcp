@@ -339,7 +339,7 @@ func BootstrapClient() (*ClientConfig, error) {
 	cfg := &ClientConfig{}
 	cfg.Admin.Enabled = true
 	cfg.Admin.Path = "/admin"
-	cfg.Admin.Listen = "127.0.0.1:8081"
+	cfg.Admin.Listen = "127.0.0.1:15630"
 	cfg.Admin.DBPath = filepath.Join("data", "client-admin.db")
 	if err := cfg.Validate(); err != nil {
 		return nil, err

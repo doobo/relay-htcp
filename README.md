@@ -238,7 +238,7 @@ log:
 
 - 当前目录存在 `data/client.yaml` 时直接加载；没有时兼容旧的 `./client.yaml`；
 - 两者都不存在时，自动创建 `data/client.yaml` 和一个只开管理面板的引导配置（`servers` / `listeners` 为空）；
-- 客户端管理面板默认在 `http://127.0.0.1:8081/admin/`，首次启动的随机密码打印在日志中；
+- 客户端管理面板默认在 `http://127.0.0.1:15630/admin/`，首次启动的随机密码打印在日志中；
 - 在面板里填写服务端、Token 和本地监听，保存后点击“重启”即可生效。数据库默认放在 `data/client-admin.db`。
 
 ### 6. 验证
@@ -428,7 +428,7 @@ proxy:
 | `shared` | bool | `false` | 仅服务端：把面板挂到隧道端口，不再单独监听；公网节点推荐开启 |
 | `path` | string | `/`（独立）/`/admin`（共用） | 面板 URL 前缀；共用模式下建议改成不易猜到的路径 |
 | `allowed_cidrs` | list | 共用模式默认全部 IP | 静态 IP 白名单（默认 `0.0.0.0/0`、`::/0`）；运行期可在面板“IP 访问”页收紧 |
-| `listen` | string | `127.0.0.1:8080` | 仅 `shared: false` 时使用，务必只绑定内网/回环地址 |
+| `listen` | string | 服务端 `127.0.0.1:8080`；客户端 `127.0.0.1:15630` | 仅 `shared: false` 时使用，务必只绑定内网/回环地址 |
 | `token` | string | 空 | 可选的静态管理 Token，供脚本直接访问 API，拥有 admin 权限 |
 | `db_path` | string | `data/admin.db` | SQLite 数据库路径；目录不存在会自动创建 |
 | `key_file` | string | `<db_path>.key` | 配置入库加密的主密钥文件；首次启动自动生成（0600） |
@@ -436,7 +436,7 @@ proxy:
 | `default_password` | string | 空 | 首次运行的管理员密码；为空则随机生成并只在日志中打印一次 |
 | `session_ttl` | duration | `24h` | 登录会话有效期 |
 
-> 服务端和客户端默认都使用 `127.0.0.1:8080`。若在同一台机器上同时运行两端，请为其中一个改端口（示例配置中客户端使用 `8081`）。`shared` 只对服务端有效；客户端没有入站隧道端口，始终使用独立监听。
+> 服务端管理面板默认监听 `127.0.0.1:8080`，客户端默认监听 `127.0.0.1:15630`，两端同机运行也不会端口冲突。`shared` 只对服务端有效；客户端没有入站隧道端口，始终使用独立监听。
 
 ### 配置优先级
 
@@ -470,7 +470,7 @@ admin:
   enabled: true
   shared: false
   path: "/ops-console"
-  listen: "127.0.0.1:8080"
+  listen: "127.0.0.1:15630"
   db_path: "data/admin.db"
 ```
 
@@ -485,7 +485,7 @@ admin panel: created default user with a generated initial password (shown only 
 请立即保存该密码并登录：
 
 - 共用模式：`https://tunnel.example.com:5630/ops-console/`（即隧道端口 + `admin.path`）
-- 独立模式：`http://127.0.0.1:8080/ops-console/`
+- 独立模式：`http://127.0.0.1:15630/ops-console/`（服务端独立面板默认 `8080`）
 
 如果服务端在远程机器上，建议通过 SSH 端口转发访问共用端口（源地址会呈现为回环，正好命中默认白名单）：
 
