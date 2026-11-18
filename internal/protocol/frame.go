@@ -82,22 +82,20 @@ func (t Type) String() string {
 }
 
 // Encode writes the frame to w.
+//
+// Header and payload go out in a single Write: every Write on an HTTP/2
+// request body becomes its own DATA frame, and two writes per frame doubled
+// the frame count (and small packets) for no benefit.
 func (f *Frame) Encode(w io.Writer) error {
 	if len(f.Payload) > MaxPayload {
 		return ErrPayloadTooBig
 	}
-	hdr := make([]byte, HeaderSize)
-	hdr[0] = byte(f.Type)
-	binary.BigEndian.PutUint32(hdr[1:], uint32(len(f.Payload)))
-	if _, err := w.Write(hdr); err != nil {
-		return err
-	}
-	if len(f.Payload) > 0 {
-		if _, err := w.Write(f.Payload); err != nil {
-			return err
-		}
-	}
-	return nil
+	buf := make([]byte, HeaderSize+len(f.Payload))
+	buf[0] = byte(f.Type)
+	binary.BigEndian.PutUint32(buf[1:], uint32(len(f.Payload)))
+	copy(buf[HeaderSize:], f.Payload)
+	_, err := w.Write(buf)
+	return err
 }
 
 // Reader reads frames from a byte stream.

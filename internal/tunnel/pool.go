@@ -602,7 +602,8 @@ func (p *Pool) heartbeat(ctx context.Context, server string, idx int, t *tunnel)
 func newSlotClient(serverURL string, tlsCfgIn config.ClientTLS, proxyCfg config.ClientProxy) (*http.Client, error) {
 	base := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
-		MaxIdleConns:        8,
+		MaxIdleConns:        64,
+		MaxIdleConnsPerHost: 32, // xhttp keeps one long download GET per stream
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 		HTTP2: &http.HTTP2Config{
