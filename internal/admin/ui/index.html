@@ -8,22 +8,7 @@
 <title>Relay-Htcp</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
-<script>
-  /* Applied before first paint so the page never flashes the wrong palette.
-     Keep the storage key in sync with app.js. */
-  (function () {
-    try {
-      var choice = localStorage.getItem("relay-htcp.theme") || "auto";
-      var theme = choice === "auto"
-        ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
-        : choice;
-      var root = document.documentElement;
-      root.setAttribute("data-theme", theme);
-      root.setAttribute("data-theme-choice", choice);
-      root.style.colorScheme = theme === "light" ? "light" : "dark";
-    } catch (e) { /* storage unavailable: keep the dark palette */ }
-  })();
-</script>
+<script src="theme.js"></script>
 </head>
 <body>
 
@@ -61,6 +46,7 @@
       <button class="tab" data-tab="users" id="users-tab">用户</button>
     </nav>
     <div class="header-actions">
+      <span id="conn-badge" class="badge conn hidden" title="与后端失去连接，正在自动重试">离线</span>
       <button id="restart-btn" type="button" class="danger small hidden"
         title="重新读取配置、重建隧道并重新绑定本地监听">重启</button>
       <select class="theme-select" data-theme-select aria-label="主题" title="外观">
@@ -192,13 +178,15 @@
           <div id="token-routes" class="route-checklist"></div>
           <small class="muted">不选 = 全部路由（不推荐）</small>
         </div>
-        <label class="form-row">
+        <div class="form-row">
           <span class="form-label">Token</span>
-          <input id="token-value" type="password" autocomplete="new-password" placeholder="留空 = 自动生成 / 保持不变">
-        </label>
-        <div class="token-checks">
-          <label class="check-row"><input type="checkbox" id="token-enabled" checked> 启用</label>
-          <label class="check-row"><input type="checkbox" id="token-generate"> 重新生成 Token</label>
+          <div class="token-value-row">
+            <input id="token-value" type="password" autocomplete="new-password" placeholder="留空 = 自动生成 / 保持不变">
+            <div class="token-checks">
+              <label class="check-row"><input type="checkbox" id="token-enabled" checked> 启用</label>
+              <label class="check-row"><input type="checkbox" id="token-generate"> 重新生成 Token</label>
+            </div>
+          </div>
         </div>
       </div>
       <p id="token-hint" class="muted"></p>
@@ -224,6 +212,7 @@
   </form>
 </dialog>
 
+<div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>
 </html>

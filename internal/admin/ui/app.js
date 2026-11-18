@@ -9,6 +9,11 @@ const state = {
   username: "",
   statusTimer: null,
   statusLoaded: false,
+  pollBusy: false,
+  pollFails: 0,
+  lastStatusJSON: "",
+  connected: true,
+  visibilityBound: false,
   configMode: "form",
   configSection: "",
   form: null,
@@ -32,6 +37,7 @@ async function api(method, path, body, options) {
   const resp = await fetch(path, opts);
   if (resp.status === 401 && !path.endsWith("auth/login")) {
     showLogin();
+    toast("会话已过期，请重新登录", "err");
     throw new Error("unauthorized");
   }
   let data = null;
@@ -46,6 +52,33 @@ async function api(method, path, body, options) {
     throw err;
   }
   return data;
+}
+
+/* ---------- toasts & guards ---------- */
+
+// Global feedback for errors that would otherwise only surface in a section
+// result box — or nowhere at all (session expiry). Auto-dismisses.
+function toast(message, kind, ttl) {
+  const region = $("#toast-region");
+  const el = document.createElement("div");
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.textContent = message;
+  region.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = "0";
+    setTimeout(() => el.remove(), 320);
+  }, ttl || (kind === "err" ? 6000 : 3500));
+}
+
+// Disables the triggering control while the action runs so a double click
+// cannot fire the same request twice.
+async function guard(btn, fn) {
+  if (btn) btn.disabled = true;
+  try {
+    await fn();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 /* ---------- theme ---------- */
@@ -359,22 +392,74 @@ function switchTab(name) {
 
 /* ---------- status ---------- */
 
+const POLL_BASE = 3000; // normal poll interval
+const POLL_MAX = 15000; // backoff ceiling while the API is unreachable
+
 function startPolling() {
   stopPolling();
-  pollStatus();
-  state.statusTimer = setInterval(pollStatus, 3000);
+  state.pollFails = 0;
+  if (!state.visibilityBound) {
+    state.visibilityBound = true;
+    // Pause polling in background tabs; an immediate poll resumes it on return.
+    document.addEventListener("visibilitychange", () => {
+      if (!state.token) return;
+      if (document.hidden) stopPolling();
+      else startPolling();
+    });
+  }
+  schedulePoll(0);
 }
 
 function stopPolling() {
-  if (state.statusTimer) clearInterval(state.statusTimer);
-  state.statusTimer = null;
+  if (state.statusTimer) {
+    clearTimeout(state.statusTimer);
+    state.statusTimer = null;
+  }
 }
 
+function schedulePoll(delay) {
+  stopPolling();
+  state.statusTimer = setTimeout(pollStatus, delay);
+}
+
+// Self-rescheduling poll: at most one request in flight (no pile-up when a
+// round trip takes longer than the interval), exponential back-off while the
+// API is down, and a visible offline badge instead of silent stale data.
 async function pollStatus() {
-  let st;
+  if (state.pollBusy) return;
+  state.pollBusy = true;
+  let st = null;
+  let ok = false;
   try {
     st = await api("GET", "api/status");
-  } catch { return; }
+    ok = true;
+  } catch { /* handled below */ }
+  state.pollBusy = false;
+
+  if (!ok) {
+    state.pollFails += 1;
+    setConnIndicator(false);
+    schedulePoll(Math.min(POLL_BASE << Math.min(state.pollFails, 4), POLL_MAX));
+    return;
+  }
+  state.pollFails = 0;
+  setConnIndicator(true);
+  renderStatus(st);
+  schedulePoll(POLL_BASE);
+}
+
+function setConnIndicator(online) {
+  if (state.connected === online) return;
+  state.connected = online;
+  $("#conn-badge").classList.toggle("hidden", online);
+}
+
+function renderStatus(st) {
+  // Skip the full innerHTML rebuild when the payload is unchanged.
+  const snap = JSON.stringify(st);
+  if (state.statusLoaded && snap === state.lastStatusJSON) return;
+  state.statusLoaded = true;
+  state.lastStatusJSON = snap;
 
   const badge = $("#role-badge");
   badge.textContent = st.role;
@@ -445,7 +530,6 @@ async function pollStatus() {
 
   $("#summary").innerHTML = cards.join("");
   $("#live").innerHTML = live;
-  state.statusLoaded = true;
 }
 
 /* ---------- config ---------- */
@@ -663,18 +747,20 @@ function reportText(rep) {
 async function saveConfig() {
   const out = $("#cfg-result");
   out.textContent = "保存中…";
-  try {
-    let rep;
-    if (state.configMode === "form") {
-      rep = await api("PUT", "api/config/form", { values: collectConfigForm() });
-    } else {
-      rep = await api("PUT", "api/config", { yaml: $("#cfg-yaml").value });
+  await guard($("#cfg-save"), async () => {
+    try {
+      let rep;
+      if (state.configMode === "form") {
+        rep = await api("PUT", "api/config/form", { values: collectConfigForm() });
+      } else {
+        rep = await api("PUT", "api/config", { yaml: $("#cfg-yaml").value });
+      }
+      out.textContent = reportText(rep);
+      await loadConfig();
+    } catch (err) {
+      out.textContent = "保存失败: " + err.message;
     }
-    out.textContent = reportText(rep);
-    await loadConfig();
-  } catch (err) {
-    out.textContent = "保存失败: " + err.message;
-  }
+  });
 }
 
 /* ---------- client tokens ---------- */
@@ -772,25 +858,27 @@ function showNewToken(tok) {
 
 async function saveToken(e) {
   e.preventDefault();
-  const index = Number($("#token-index").value);
-  const body = {
-    name: $("#token-name").value.trim(),
-    routes: [...document.querySelectorAll("#token-routes input:checked")].map((el) => el.value),
-    token: $("#token-value").value,
-    enabled: $("#token-enabled").checked,
-    generate: $("#token-generate").checked,
-  };
-  try {
-    const rep = index >= 0
-      ? await api("PUT", "api/tokens/" + index, body)
-      : await api("POST", "api/tokens", body);
-    tokenFormClose();
-    await loadTokens();
-    showNewToken(rep.token);
-    if (!rep.token) $("#token-result").textContent = "已保存";
-  } catch (err) {
-    $("#token-hint").textContent = "保存失败: " + err.message;
-  }
+  await guard(e.submitter, async () => {
+    const index = Number($("#token-index").value);
+    const body = {
+      name: $("#token-name").value.trim(),
+      routes: [...document.querySelectorAll("#token-routes input:checked")].map((el) => el.value),
+      token: $("#token-value").value,
+      enabled: $("#token-enabled").checked,
+      generate: $("#token-generate").checked,
+    };
+    try {
+      const rep = index >= 0
+        ? await api("PUT", "api/tokens/" + index, body)
+        : await api("POST", "api/tokens", body);
+      tokenFormClose();
+      await loadTokens();
+      showNewToken(rep.token);
+      if (!rep.token) $("#token-result").textContent = "已保存";
+    } catch (err) {
+      $("#token-hint").textContent = "保存失败: " + err.message;
+    }
+  });
 }
 
 async function tokenAction(e) {
@@ -802,14 +890,16 @@ async function tokenAction(e) {
     return;
   }
   if (btn.dataset.act === "del") {
-    if (!(await uiConfirm("删除 Token", "使用该 Token 的客户端会立即断开。确认删除？", { danger: true, okText: "删除" }))) return;
-    try {
-      await api("DELETE", "api/tokens/" + index);
-      await loadTokens();
-      $("#token-result").textContent = "已删除";
-    } catch (err) {
-      $("#token-result").textContent = "删除失败: " + err.message;
-    }
+    await guard(btn, async () => {
+      if (!(await uiConfirm("删除 Token", "使用该 Token 的客户端会立即断开。确认删除？", { danger: true, okText: "删除" }))) return;
+      try {
+        await api("DELETE", "api/tokens/" + index);
+        await loadTokens();
+        $("#token-result").textContent = "已删除";
+      } catch (err) {
+        $("#token-result").textContent = "删除失败: " + err.message;
+      }
+    });
   }
 }
 
@@ -833,16 +923,18 @@ async function loadIPAccess() {
 
 async function saveIPAccess(e) {
   e.preventDefault();
-  try {
-    const data = await api("PUT", "api/ip-access", {
-      whitelist: parseIPLines($("#ip-whitelist").value),
-      blacklist: parseIPLines($("#ip-blacklist").value),
-    });
-    $("#ip-client").textContent = data.client_ip || "-";
-    $("#ip-result").textContent = "已保存";
-  } catch (err) {
-    $("#ip-result").textContent = "保存失败: " + err.message;
-  }
+  await guard(e.submitter, async () => {
+    try {
+      const data = await api("PUT", "api/ip-access", {
+        whitelist: parseIPLines($("#ip-whitelist").value),
+        blacklist: parseIPLines($("#ip-blacklist").value),
+      });
+      $("#ip-client").textContent = data.client_ip || "-";
+      $("#ip-result").textContent = "已保存";
+    } catch (err) {
+      $("#ip-result").textContent = "保存失败: " + err.message;
+    }
+  });
 }
 
 /* ---------- shared dialogs ---------- */
@@ -952,44 +1044,48 @@ async function loadUsers() {
   }
 }
 
-async function userAction(act, id, extra) {
+async function userAction(act, id, extra, btn) {
   const out = $("#user-result");
-  try {
-    if (act === "pass") {
-      const pw = await uiPrompt("修改密码", "请输入新密码（至少 8 位）。", "新密码", true);
-      if (!pw) return;
-      await api("PUT", "api/users/" + id, { password: pw });
-      out.textContent = "密码已修改";
-    } else if (act === "toggle") {
-      await api("PUT", "api/users/" + id, { enabled: extra === "0" });
-      out.textContent = extra === "0" ? "用户已启用" : "用户已禁用";
-    } else if (act === "del") {
-      if (!(await uiConfirm("删除用户", "确认删除该用户？此操作不可撤销。", { danger: true, okText: "删除" }))) return;
-      await api("DELETE", "api/users/" + id);
-      out.textContent = "用户已删除";
+  await guard(btn, async () => {
+    try {
+      if (act === "pass") {
+        const pw = await uiPrompt("修改密码", "请输入新密码（至少 8 位）。", "新密码", true);
+        if (!pw) return;
+        await api("PUT", "api/users/" + id, { password: pw });
+        out.textContent = "密码已修改";
+      } else if (act === "toggle") {
+        await api("PUT", "api/users/" + id, { enabled: extra === "0" });
+        out.textContent = extra === "0" ? "用户已启用" : "用户已禁用";
+      } else if (act === "del") {
+        if (!(await uiConfirm("删除用户", "确认删除该用户？此操作不可撤销。", { danger: true, okText: "删除" }))) return;
+        await api("DELETE", "api/users/" + id);
+        out.textContent = "用户已删除";
+      }
+      loadUsers();
+    } catch (err) {
+      out.textContent = "操作失败: " + err.message;
     }
-    loadUsers();
-  } catch (err) {
-    out.textContent = "操作失败: " + err.message;
-  }
+  });
 }
 
 async function createUser(e) {
   e.preventDefault();
   const out = $("#user-result");
-  try {
-    await api("POST", "api/users", {
-      username: $("#new-user").value,
-      password: $("#new-pass").value,
-      role: $("#new-role").value,
-    });
-    out.textContent = "用户已创建";
-    $("#new-user").value = "";
-    $("#new-pass").value = "";
-    loadUsers();
-  } catch (err) {
-    out.textContent = "创建失败: " + err.message;
-  }
+  await guard(e.submitter, async () => {
+    try {
+      await api("POST", "api/users", {
+        username: $("#new-user").value,
+        password: $("#new-pass").value,
+        role: $("#new-role").value,
+      });
+      out.textContent = "用户已创建";
+      $("#new-user").value = "";
+      $("#new-pass").value = "";
+      loadUsers();
+    } catch (err) {
+      out.textContent = "创建失败: " + err.message;
+    }
+  });
 }
 
 /* ---------- init ---------- */
@@ -1035,7 +1131,7 @@ document.querySelectorAll(".tab").forEach((b) =>
   b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $("#users-table").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-act]");
-  if (btn) userAction(btn.dataset.act, btn.dataset.id, btn.dataset.en);
+  if (btn) userAction(btn.dataset.act, btn.dataset.id, btn.dataset.en, btn);
 });
 
 if (state.token) {

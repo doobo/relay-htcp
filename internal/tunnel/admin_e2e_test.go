@@ -122,7 +122,7 @@ func TestAdminFullStack(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("relay-htcp")) {
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(bytes.ToLower(body), []byte("relay-htcp")) {
 		t.Fatalf("ui: %d, body len %d", resp.StatusCode, len(body))
 	}
 

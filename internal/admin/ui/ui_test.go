@@ -14,6 +14,7 @@ func TestHandlerServesAssets(t *testing.T) {
 		"/":                    "Relay-Htcp",
 		"/app.js":              "encryptWithWebCrypto",
 		"/style.css":           "--bg",
+		"/theme.js":            "data-theme",
 		"/favicon.svg":         "<svg",
 		"/vendor/tweetnacl.js": "nacl",
 	} {
@@ -39,6 +40,13 @@ func TestHandlerServesAssets(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
 		t.Fatalf("app.js Cache-Control = %q, want no-store", cc)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Fatalf("Content-Security-Policy = %q, want frame-ancestors 'none'", csp)
 	}
 }
 
