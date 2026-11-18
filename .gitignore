@@ -1,5 +1,7 @@
 /relay-htcp
 /relay-htcp.exe
+# The Go linker moves a running binary aside to "<name>~" before replacing it.
+*~
 /dist/
 *.key
 *.db
