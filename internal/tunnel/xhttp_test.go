@@ -13,6 +13,11 @@ import (
 )
 
 func startXHTTPClient(t *testing.T, serverAddr string, tlsSkip bool, xhttpPath string) (localAddr string, stop func()) {
+	localAddr, _, stop = startXHTTPClientPool(t, serverAddr, tlsSkip, xhttpPath)
+	return localAddr, stop
+}
+
+func startXHTTPClientPool(t *testing.T, serverAddr string, tlsSkip bool, xhttpPath string) (localAddr string, pool *Pool, stop func()) {
 	t.Helper()
 	cfg := &config.ClientConfig{
 		Auth: config.ClientAuth{Token: testToken},
@@ -50,7 +55,7 @@ func startXHTTPClient(t *testing.T, serverAddr string, tlsSkip bool, xhttpPath s
 	l := cfg.Listeners[0]
 	l.Local = ln.Addr().String()
 	go pool.ServeListener(ctx, ln, l)
-	return ln.Addr().String(), func() {
+	return ln.Addr().String(), pool, func() {
 		cancel()
 		_ = ln.Close()
 	}

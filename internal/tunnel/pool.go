@@ -141,15 +141,23 @@ type Pool struct {
 
 	lmu       sync.Mutex
 	listeners map[string]*listenerState
+
+	// Warm pool of pre-opened xhttp download streams, keyed by
+	// server+route; see prewarmXHTTP.
+	spareMu      sync.Mutex
+	spares       map[string][]*xhttpStream
+	spareOpening map[string]bool
 }
 
 // NewPool builds the tunnel connection pools, one set of slots per server.
 func NewPool(cfg *config.ClientConfig, log *slog.Logger) (*Pool, error) {
 	p := &Pool{
-		log:       log,
-		changes:   make(chan struct{}, 1),
-		listeners: make(map[string]*listenerState),
-		startedAt: time.Now(),
+		log:          log,
+		changes:      make(chan struct{}, 1),
+		listeners:    make(map[string]*listenerState),
+		spares:       make(map[string][]*xhttpStream),
+		spareOpening: make(map[string]bool),
+		startedAt:    time.Now(),
 	}
 	p.cfg.Store(cfg)
 	for _, rs := range cfg.ResolvedServers() {
@@ -180,6 +188,10 @@ func (p *Pool) Start(ctx context.Context) {
 			go p.keepAlive(ctx, srv, i, s)
 		}
 	}
+	go func() {
+		<-ctx.Done()
+		p.closeSparesXHTTP()
+	}()
 }
 
 // Acquire returns a live tunnel for the listener, waiting up to timeout for

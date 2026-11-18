@@ -2,9 +2,11 @@ package tunnel
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -23,6 +25,10 @@ import (
 
 const maxXHTTPUploadBody = 4 << 20
 
+// maxXHTTPUploadReorder bounds how many out-of-order upload batches a session
+// may buffer while waiting for the missing sequence number.
+const maxXHTTPUploadReorder = 8
+
 // xhttpPaddingBytes is one NOOP padding frame at the start of every download.
 // It nudges proxy/CDN response buffers that otherwise hold very small bodies.
 const xhttpPaddingBytes = 512
@@ -38,8 +44,16 @@ type xhttpSession struct {
 
 	sendMu  sync.Mutex // serializes writes to the download response
 	writeMu sync.Mutex // serializes writes to the target connection
-	done    chan struct{}
-	once    sync.Once
+
+	// Upload batches may arrive out of order once the client pipelines them:
+	// upNext is the next sequence number to apply and upPending holds batches
+	// that arrived early.
+	upMu      sync.Mutex
+	upNext    uint64
+	upPending map[uint64][]*protocol.Frame
+
+	done chan struct{}
+	once sync.Once
 
 	bytesIn  atomic.Int64 // upload -> target
 	bytesOut atomic.Int64 // target -> download
@@ -157,6 +171,9 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
+	// Tell the client it may pipeline uploads; older clients ignore this and
+	// keep sending strictly ordered batches without X-Upload-Seq.
+	w.Header().Set(xhttpPipelineHeader, "1")
 	w.WriteHeader(http.StatusOK)
 	if fl != nil {
 		fl.Flush()
@@ -164,7 +181,7 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 
 	ss := &xhttpSession{
 		id: id, token: entry.name, route: route, remote: r.RemoteAddr,
-		conn: conn, w: w, fl: fl, done: make(chan struct{}),
+		conn: conn, w: w, fl: fl, done: make(chan struct{}), upNext: 1,
 	}
 	if !s.addXHTTPSession(ss) {
 		_ = conn.Close()
@@ -230,7 +247,59 @@ func (s *Server) handleXHTTPUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxXHTTPUploadBody)
+	seq, hasSeq, ok := parseUploadSeq(r.Header.Get(xhttpUploadSeqHeader))
+	if !ok {
+		http.Error(w, "invalid upload seq", http.StatusBadRequest)
+		return
+	}
 	rd := protocol.NewReader(r.Body)
+
+	if !hasSeq {
+		// Legacy sequential upload: apply frames as they arrive so a large
+		// body streams straight into the target.
+		for {
+			f, err := rd.Read()
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					break
+				}
+				http.Error(w, "invalid frame", http.StatusBadRequest)
+				return
+			}
+			switch f.Type {
+			case protocol.TypeData:
+				if len(f.Payload) == 0 {
+					continue
+				}
+				ss.writeMu.Lock()
+				_, werr := ss.conn.Write(f.Payload)
+				ss.writeMu.Unlock()
+				if werr != nil {
+					s.log.Debug("xhttp: target write failed", "route", ss.route, "session", id, "err", werr)
+					ss.close()
+					http.Error(w, "stream closed", http.StatusGone)
+					return
+				}
+				ss.bytesIn.Add(int64(len(f.Payload)))
+			case protocol.TypePing:
+				_ = ss.send(&protocol.Frame{Type: protocol.TypePong, Payload: f.Payload})
+			case protocol.TypeClose:
+				ss.close()
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+		if ss.closed() {
+			http.Error(w, "stream closed", http.StatusGone)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Pipelined upload: buffer the batch, then apply everything that is now
+	// contiguous from ss.upNext.
+	var frames []*protocol.Frame
 	for {
 		f, err := rd.Read()
 		if err != nil {
@@ -240,6 +309,72 @@ func (s *Server) handleXHTTPUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid frame", http.StatusBadRequest)
 			return
 		}
+		frames = append(frames, f)
+	}
+	if err := ss.applyUploadSeq(seq, frames); err != nil {
+		s.log.Debug("xhttp: apply pipelined upload failed",
+			"route", ss.route, "session", id, "seq", seq, "err", err)
+		http.Error(w, "stream closed", http.StatusGone)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// parseUploadSeq reads the optional batch sequence header. present is false
+// for legacy clients, ok is false for a malformed value.
+func parseUploadSeq(v string) (seq uint64, present bool, ok bool) {
+	if v == "" {
+		return 0, false, true
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil || n == 0 {
+		return 0, true, false
+	}
+	return n, true, true
+}
+
+// applyUploadSeq applies upload batches in order. Batches that arrive ahead of
+// the missing sequence number are buffered until the gap is filled, which is
+// what makes client-side upload pipelining safe.
+func (ss *xhttpSession) applyUploadSeq(seq uint64, frames []*protocol.Frame) error {
+	ss.upMu.Lock()
+	defer ss.upMu.Unlock()
+	if seq < ss.upNext {
+		return nil // duplicate or retransmit: already applied
+	}
+	if seq > ss.upNext {
+		if ss.upPending == nil {
+			ss.upPending = make(map[uint64][]*protocol.Frame)
+		}
+		if _, dup := ss.upPending[seq]; dup {
+			return nil
+		}
+		if len(ss.upPending) >= maxXHTTPUploadReorder {
+			return fmt.Errorf("upload reorder buffer full (%d batches)", len(ss.upPending))
+		}
+		ss.upPending[seq] = frames
+		return nil
+	}
+	if err := ss.applyUploadFrames(frames); err != nil {
+		return err
+	}
+	ss.upNext++
+	for {
+		next, ok := ss.upPending[ss.upNext]
+		if !ok {
+			return nil
+		}
+		delete(ss.upPending, ss.upNext)
+		if err := ss.applyUploadFrames(next); err != nil {
+			return err
+		}
+		ss.upNext++
+	}
+}
+
+// applyUploadFrames writes one in-order batch to the target connection.
+func (ss *xhttpSession) applyUploadFrames(frames []*protocol.Frame) error {
+	for _, f := range frames {
 		switch f.Type {
 		case protocol.TypeData:
 			if len(f.Payload) == 0 {
@@ -249,23 +384,16 @@ func (s *Server) handleXHTTPUpload(w http.ResponseWriter, r *http.Request) {
 			_, werr := ss.conn.Write(f.Payload)
 			ss.writeMu.Unlock()
 			if werr != nil {
-				s.log.Debug("xhttp: target write failed", "route", ss.route, "session", id, "err", werr)
 				ss.close()
-				http.Error(w, "stream closed", http.StatusGone)
-				return
+				return werr
 			}
 			ss.bytesIn.Add(int64(len(f.Payload)))
 		case protocol.TypePing:
 			_ = ss.send(&protocol.Frame{Type: protocol.TypePong, Payload: f.Payload})
 		case protocol.TypeClose:
 			ss.close()
-			w.WriteHeader(http.StatusOK)
-			return
+			return nil
 		}
 	}
-	if ss.closed() {
-		http.Error(w, "stream closed", http.StatusGone)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
+	return nil
 }
