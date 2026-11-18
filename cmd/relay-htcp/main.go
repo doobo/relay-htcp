@@ -24,7 +24,9 @@ import (
 	"relay-htcp/internal/tunnel"
 )
 
-const version = "0.1.0"
+// version is the release version shown by `relay-htcp version`. Release builds
+// override it with -ldflags "-X main.version=v1.2.3"; see the Makefile.
+var version = "0.1.0"
 
 func main() {
 	args := os.Args[1:]

@@ -1,0 +1,4 @@
+# Shell scripts and the Makefile must keep LF so `sh scripts/*.sh` works after
+# a Windows checkout with core.autocrlf=true.
+*.sh     text eol=lf
+Makefile text eol=lf

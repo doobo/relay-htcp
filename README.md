@@ -78,6 +78,10 @@
 ```bash
 cd relay-htcp
 
+# 推荐：自动识别平台、注入版本号
+make build
+
+# 等价的手写命令
 go build -trimpath -o relay-htcp ./cmd/relay-htcp
 # Windows:
 # go build -trimpath -o relay-htcp.exe ./cmd/relay-htcp
@@ -88,6 +92,8 @@ go build -trimpath -o relay-htcp ./cmd/relay-htcp
 ```bash
 go run ./cmd/relay-htcp version
 ```
+
+完整的构建、打包与 GitHub 发布流程见下文「构建与发布」。
 
 ### 3. 准备证书
 
@@ -704,6 +710,49 @@ go test ./internal/admin -v
 
 > Windows 上如果 `go test` 报测试二进制 `Access is denied`，通常是安全软件拦截了临时目录中的可执行文件。可先 `go test -c -o ui.test.exe ./internal/admin/ui/` 再手动运行，或把 Go 构建缓存目录加入白名单。
 
+## 构建与发布
+
+日常开发用 Makefile，等价命令也写在括号里；没有 `make` 时可直接用括号里的 `go` 命令。
+
+| 目标 | 作用 |
+|---|---|
+| `make build` | 编译当前平台二进制到 `./relay-htcp`（Windows 为 `relay-htcp.exe`） |
+| `make vet` / `make test` | `go vet ./...` / `go test ./...` |
+| `make fmt-check` | 检查 `gofmt`，CI 使用 |
+| `make all` | `vet` + `test`，提交前跑一遍 |
+| `make licenses` | 收集依赖许可证到 `dist/THIRD_PARTY_LICENSES`，并复制 `LICENSE` |
+| `make release` | 交叉编译各平台发布包到 `dist/`，并生成 `SHA256SUMS` |
+| `make help` | 列出全部目标 |
+
+版本号在编译期注入（`main.go` 里是 `var version`，可用 `-ldflags` 覆盖）：
+
+```bash
+make build VERSION=v0.2.0 && ./relay-htcp version   # relay-htcp v0.2.0
+```
+
+本地打全平台发布包（默认 `linux/amd64 linux/arm64 linux/386 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64`，可用 `PLATFORMS="..."` 覆盖）：
+
+```bash
+make release VERSION=v0.2.0
+ls dist
+# relay-htcp-v0.2.0-linux-amd64.tar.gz ... SHA256SUMS LICENSE THIRD_PARTY_LICENSES
+```
+
+每个发布包内含二进制、`LICENSE` 和 `THIRD_PARTY_LICENSES`；`dist/SHA256SUMS` 可用于下载后校验。
+
+### GitHub Actions 发布
+
+工作流在 `.github/workflows/release.yml`，两种触发方式：
+
+```bash
+# 1. 推标签：自动跑检查、打包、建 Release
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+2. 手动触发：Actions 页选择 **Release → Run workflow**，填写版本号（`v0.2.0` 或 `0.2.0` 均可），可勾选草稿 / 预发布。
+
+流程固定为：确定并校验版本号 → `fmt-check` / `vet` / `test` → `make release` → 校验 `SHA256SUMS` → 生成下载说明 → 打标签（手动触发时）并 `gh release create`。标签已存在或 Release 已存在都会直接失败，避免覆盖已发布的产物。
+
 ## 目录结构
 
 ```
@@ -716,6 +765,9 @@ internal/admin/        管理后台 API、SQLite 存储（配置入库加密）�
 internal/admin/ui/     内嵌的单页管理前端（主题、加密登录、表单配置、用户管理）
 config/                服务端/客户端示例配置
 data/                  运行时默认目录（client.yaml、admin.db / client-admin.db、主密钥、WAL；自动创建）
+Makefile               构建、检查、打包入口
+scripts/               发布辅助脚本（依赖许可证收集）
+.github/workflows/     CI 发布流程
 Task.md                最初的设计与实施方案
 ```
 
