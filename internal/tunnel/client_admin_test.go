@@ -171,10 +171,10 @@ func TestPoolListenerHotApply(t *testing.T) {
 func TestPoolApplyConfigKeepsAdminSection(t *testing.T) {
 	l1 := freeLocalAddr(t)
 	cfg := &config.ClientConfig{
-		Server:  "http://127.0.0.1:1",
-		Auth:    config.ClientAuth{Token: testToken},
+		Server:    "http://127.0.0.1:1",
+		Auth:      config.ClientAuth{Token: testToken},
 		Listeners: []config.Listener{{Local: l1, Target: "echo"}},
-		Admin:   config.AdminConfig{Enabled: true, Listen: "127.0.0.1:15630"},
+		Admin:     config.AdminConfig{Enabled: true, Listen: "127.0.0.1:15630"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
