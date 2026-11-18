@@ -8,3 +8,11 @@
 Task.md
 .atomcode/
 /data/
+
+# Runtime config written back by the admin panel; contains tokens and the
+# admin password, so it must never be committed. Use config/*.example.yaml.
+/server.yaml
+/client.yaml
+
+# Runtime logs (created by start scripts / manual runs).
+/logs/
