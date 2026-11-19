@@ -72,10 +72,54 @@ func TestConfigFormSchemaMatchesYAML(t *testing.T) {
 				row, _ := rows[0].(map[string]any)
 				for _, col := range f.Columns {
 					if _, ok := row[col.Path]; !ok {
+						// Optional bool cells may be omitted (unset = false).
+						if col.Type == admin.FormBool {
+							continue
+						}
 						t.Errorf("%s: table %q column %q missing", name, f.Path, col.Path)
 					}
 				}
 			}
 		}
+	}
+}
+
+// TestClientListenerServersDropdown pins the widget used for listener ->
+// servers: a dropdown multi-select populated with the configured servers.
+func TestClientListenerServersDropdown(t *testing.T) {
+	cfg := &config.ClientConfig{
+		Auth: config.ClientAuth{Token: "token"},
+		Servers: []config.ServerEndpoint{
+			{Name: "primary", URL: "http://127.0.0.1:1"},
+			{Name: "backup", URL: "http://127.0.0.1:2"},
+		},
+		Listeners: []config.Listener{{Local: "127.0.0.1:0", Target: "ssh"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := NewPool(cfg, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var col admin.FormField
+	for _, sec := range pool.ConfigFormSchema().Sections {
+		for _, f := range sec.Fields {
+			if f.Path != "listeners" {
+				continue
+			}
+			for _, c := range f.Columns {
+				if c.Path == "servers" {
+					col = c
+				}
+			}
+		}
+	}
+	if col.Type != admin.FormMultiSelect {
+		t.Fatalf("listeners.servers type = %q, want %q", col.Type, admin.FormMultiSelect)
+	}
+	if strings.Join(col.Options, ",") != "primary,backup" {
+		t.Fatalf("listeners.servers options = %v", col.Options)
 	}
 }

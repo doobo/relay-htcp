@@ -27,10 +27,11 @@
 - **明文 h2c**：无 TLS 时使用 HTTP/2 明文（h2c），适合内网和测试。
 - **伪装（可选）**：浏览器风格请求头、仿 nginx 的 `Server` 头、未知路径返回静态诱饵页。
 - **热更新**：通过管理面板修改配置，部分字段无需重启即可生效。
+- **服务端出口代理**：支持全局 HTTP/SOCKS5 代理；内网路由可单独勾选“走代理”，未勾选的路由保持直连。
 - **端口共用与伪装**：服务端管理面板可挂到隧道端口下的自定义路径，外部只看到一个 Web 服务。
 - **加密登录与主题**：登录密码用 RSA-OAEP + AES-GCM（不支持 WebCrypto 时回退 TweetNaCl）加密；支持跟随系统/深色/浅色/纯黑主题。
 - **表单化配置**：配置页按角色渲染结构化表单，密钥字段掩码显示、留空保持原值；仍可切换到 YAML 高级模式。
-- **客户端 Token 独立页**：Token 列表从配置表单拆出，支持路由绑定、启用/禁用、一次性生成或重新生成；密钥只在生成时显示一次。
+- **客户端 Token 独立页**：Token 列表从配置表单拆出，支持路由绑定、启用/禁用、一次性生成或重新生成；密钥只在生成时显示一次。每个 Token 支持日/周/月流量上限（MB，默认不限制）和限制开关，后台每 5 分钟（可配置）刷新一次；详情页可查看最近日流量。
 - **IP 访问控制**：面板内维护黑白名单（IP/CIDR），默认空；白名单非空时只放行白名单，黑名单始终拒绝，回环地址不受限制；兼容 Cloudflare / cloudflared 的 `CF-Connecting-IP`、`X-Forwarded-For`。
 - **密钥入库加密**：SQLite 中的配置与 Token 采用 AES-256-GCM 信封加密（随机数据密钥 + 独立主密钥），主密钥默认保存在数据库旁的 `0600` 密钥文件，也可用环境变量注入。
 - **管理面板**：登录、实时状态、连接与流量统计、配置编辑、Token 管理、IP 访问控制、用户与角色管理，前端已内嵌进二进制。客户端面板支持一键重启：重新读取配置、重建隧道连接池并重新绑定本地监听，原本需要重启才生效的字段（`servers`、`tunnel.*`、`log.level` 等）也会立即应用。
@@ -384,14 +385,25 @@ proxy:
 | `auth.tokens[].token` | string | 必填 | Bearer Token 明文，建议至少 32 字节随机值 |
 | `auth.tokens[].routes` | list | 空 | 该 Token 允许访问的路由名，可多选；留空表示允许所有路由（不推荐） |
 | `auth.tokens[].enabled` | bool | `true` | 是否启用；禁用的 Token 保留在配置里但不再通过认证 |
+| `auth.tokens[].limit_enabled` | bool | `false` | 启用日/周/月流量限制；后台任务定期刷新限制开关 |
+| `auth.tokens[].daily_limit_mb` | int | `0` | 每日流量上限（MB），`0` 表示不限制 |
+| `auth.tokens[].weekly_limit_mb` | int | `0` | 每周流量上限（MB），`0` 表示不限制 |
+| `auth.tokens[].monthly_limit_mb` | int | `0` | 每月流量上限（MB），`0` 表示不限制 |
 | `routes` | list | 必填 | 至少一个路由，名称不能重复 |
 | `routes[].name` | string | 必填 | 逻辑路由名，客户端通过 `X-Tunnel-Target` 引用 |
-| `routes[].target` | string | 必填 | 内网目标地址，如 `127.0.0.1:22` |
+| `routes[].target` | string | 必填 | TCP 目标，支持 `host:port` 或 `http(s)://host[:port]`（URL 仅取主机和端口，https 默认 443、http 默认 80） |
+| `routes[].use_proxy` | bool | `false` | 该路由是否走服务端全局出口代理；未勾选的路由直连目标 |
+| `proxy.enabled` | bool | `false` | 启用服务端出口代理，只影响 `routes[].use_proxy` 为 `true` 的路由 |
+| `proxy.type` | string | `http` | `http`（CONNECT）或 `socks5` |
+| `proxy.address` | string | 空 | 代理地址 `host:port`，启用时必填 |
+| `proxy.username` | string | 空 | 代理用户名（可选） |
+| `proxy.password` | string | 空 | 代理密码（可选） |
 | `tunnel.max_concurrent_streams` | int | `128` | 每条 HTTP/2 连接允许的并发流上限，需重启生效 |
 | `tunnel.max_connections` | int | `0` | 同时在线控制连接数上限，`0` 表示不限制 |
 | `tunnel.dial_timeout` | duration | `10s` | 拨号内网目标的超时时间 |
 | `tunnel.idle_timeout` | duration | `90s` | 控制流静默多久后断开 |
-| `tunnel.xhttp_path` | string | `/relay` | xhttp 传输的端点前缀；默认 `/relay`，避免与 Xray 常用的 `/xhttp` 冲突 |
+| `tunnel.xhttp_path` | string | `/relay` | xhttp 传输的端点前缀，默认 `/relay` |
+| `tunnel.quota_refresh` | duration | `5m` | 重新统计 Token 流量并刷新限制开关的间隔 |
 | `disguise.enabled` | bool | `true` | 是否启用诱饵页和伪装响应头 |
 | `log.level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `admin.*` | object | 见下文 | 管理面板配置 |
@@ -514,13 +526,13 @@ ssh -L 5630:127.0.0.1:5630 user@server
 - **加密登录**：浏览器先请求一次 `POST /api/auth/challenge` 获取 RSA 公钥、X25519 公钥和一次性 nonce，再用 WebCrypto（AES-GCM + RSA-OAEP）加密 `{username,password,nonce}`；不支持 `crypto.subtle` 的明文 HTTP 环境自动回退到 TweetNaCl box。密码不会以明文进入请求体，nonce 单次有效、防重放。
 - 这层加密只是让被动观察者看不到密码，**不能替代 TLS**；公网共用端口仍应启用 TLS。
 - **主题**：支持 跟随系统 / 深色 / 浅色 / 纯黑，登录页和顶栏都能切换，选择保存在浏览器 `localStorage`。
-- 登录后默认进入结构化配置表单，密钥字段始终掩码；支持切换 YAML 高级模式。
+- 登录后默认进入结构化配置表单，密钥字段始终掩码；`admin` 还可切换 YAML 高级模式。
 
 面板页签：
 
-- **状态**：运行时长、活跃隧道/连接、上下行字节数、诱饵页访问次数、实时连接列表。
-- **配置**：默认使用结构化表单编辑，字段分组随服务端/客户端角色自动变化；可切换到 YAML 高级模式。保存结果会列出哪些字段已热应用、哪些需要重启。
-- **客户端 Token**（仅服务端）：独立管理页，可新增/编辑/删除 Token、多选绑定路由、启用/禁用、一次性生成或重新生成密钥。
+- **状态**：运行时长、活跃隧道/连接、上下行字节数、诱饵页访问次数、实时连接列表；底部显示当日流量（服务端按客户端 Token、客户端按服务端路由），默认展示前 20 条并可按 Token/服务端筛选。
+- **配置**：默认使用结构化表单编辑，字段分组随服务端/客户端角色自动变化；`admin` 可切换到 YAML 高级模式。保存结果会列出哪些字段已热应用、哪些需要重启。
+- **客户端 Token**（仅服务端）：独立管理页，可新增/编辑/删除 Token、多选绑定路由、启用/禁用、一次性生成或重新生成密钥；支持日/周/月流量上限与限制开关，“详细”可查看周期统计和最近日流量。
 - **IP 访问**（仅管理员）：维护管理面板的黑白名单，支持 IP 与 CIDR，保存后立即生效。
 - **用户**：创建/修改/删除用户，分配 `admin` 或 `viewer` 角色，启用/禁用账号。
 
@@ -550,7 +562,7 @@ Token 已从配置表单中拆出，避免在长表单里误操作。页面上�
 
 ### 表单化配置
 
-配置页默认按角色渲染结构化表单：服务端包含监听/TLS、隧道参数、内网路由（Token 已移到独立页）；客户端的配置页拆成“服务端 / 本地监听 / 代理 / 隧道参数”四个子页签，服务端列表和本地监听分别编辑。服务端页可维护多个服务端及各自的 Token/CA，本地监听页为每个监听选择服务端并设置轮询或故障转移策略。表单由后端 schema 驱动（`Provider.ConfigFormSchema`），后续新增可调参数只需在 schema 中加一行，前端和 API 无需改动。
+配置页默认按角色渲染结构化表单：服务端包含监听/TLS、隧道参数、内网路由（Token 已移到独立页）；客户端的配置页拆成“服务端 / 本地监听 / 代理 / 隧道参数”四个子页签，服务端列表和本地监听分别编辑。服务端页可维护多个服务端及各自的 Token/CA，本地监听页为每个监听选择服务端并设置轮询或故障转移策略：**“选择服务端”是下拉多选**，选项来自服务端列表（含同一次编辑里刚改的名字），不勾选即表示使用全部服务端。表单由后端 schema 驱动（`Provider.ConfigFormSchema`），后续新增可调参数只需在 schema 中加一行，前端和 API 无需改动。
 
 密钥字段掩码规则：
 
@@ -558,12 +570,12 @@ Token 已从配置表单中拆出，避免在长表单里误操作。页面上�
 - 保存时留空表示“保持原值”；表格行用隐藏的 `_id` 对应原行，增删行、改名都不会误删已有 Token；
 - 需要更换时直接填入新值即可，保存后仍按前述方式加密入库。
 
-如果更习惯直接编辑整段配置，可点“YAML”切回原有模式；该模式下已登录用户仍能看到明文，`viewer` 权限需谨慎授予。
+如果更习惯直接编辑整段配置，可点“YAML”切回原有模式；`admin` 才能使用该模式，`viewer` 的 YAML 按钮会隐藏，后端也会拒绝读取，避免 Token 明文泄露。
 
 ### 角色与安全机制
 
 - `admin`：可读写配置和用户。
-- `viewer`：只读，可查看状态和完整配置，但不能修改配置或用户。
+- `viewer`：只读，可查看状态和掩码后的配置表单，但不能读取 YAML、修改配置或用户。
 - 密码使用 bcrypt（cost 10）存储；会话 Token 只在数据库中保存 SHA-256 哈希。
 - 登录失败默认按 IP 限流：每分钟最多 10 次失败；成功登录会清空计数。
 - 系统会阻止删除/禁用/降级最后一个启用的管理员，也禁止删除当前登录账号。
@@ -618,14 +630,16 @@ Authorization: Bearer <session-token 或 admin.token>
 | `POST` | `/api/auth/logout` | 注销当前会话 |
 | `GET` | `/api/status` | 实时状态 |
 | `POST` | `/api/restart` | 重启客户端（重新读取配置、重建连接池、重新绑定监听）；仅客户端支持，需要 admin 权限 |
-| `GET` | `/api/config` | 当前配置 YAML 与来源（`file`/`db`） |
+| `GET` | `/api/config` | 当前配置 YAML 与来源（`file`/`db`）；仅 admin，viewer 不可读（YAML 含 Token 明文） |
 | `PUT` | `/api/config` | 保存配置，body 为 `{"yaml":"..."}` |
 | `GET` | `/api/config/form` | 结构化表单 schema 与当前值（secret 字段已掩码） |
 | `PUT` | `/api/config/form` | 保存表单，body 为 `{"values":{...}}`；secret 留空保持原值 |
 | `GET` | `/api/tokens` | 客户端 Token 列表（仅服务端；密钥只返回尾部提示） |
+| `GET` | `/api/tokens/{index}/traffic` | 单个 Token 的周期统计与最近日流量（`days` 默认 14） |
 | `POST` | `/api/tokens` | 新建 Token，空 token 自动生成并在响应中返回一次 |
-| `PUT` | `/api/tokens/{index}` | 修改名称/路由/启用状态；`generate:true` 重新生成 |
+| `PUT` | `/api/tokens/{index}` | 修改名称/路由/启用状态/流量限制；`generate:true` 重新生成 |
 | `DELETE` | `/api/tokens/{index}` | 删除 Token；至少保留一个 |
+| `GET` | `/api/traffic/daily` | 当日日流量；服务端按 Token（`token`）筛选，客户端按服务端（`server`）筛选，默认最多 20 条 |
 | `GET` | `/api/ip-access` | 黑白名单与当前识别到的客户端 IP |
 | `PUT` | `/api/ip-access` | 保存黑白名单，立即生效 |
 | `GET` | `/api/users` | 用户列表 |

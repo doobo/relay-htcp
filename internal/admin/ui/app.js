@@ -22,6 +22,9 @@ const state = {
   tokenEdit: -1,
   tokenLoaded: false,
   restarting: false,
+  trafficRole: "",
+  trafficLoadedAt: 0,
+  trafficBusy: false,
 };
 
 /* ---------- API ---------- */
@@ -213,6 +216,10 @@ async function showApp() {
     $("#users-tab").style.display = me.role === "admin" ? "" : "none";
     $("#token-add").style.display = me.role === "admin" ? "" : "none";
     $("#ip-tab").style.display = me.role === "admin" ? "" : "none";
+    // The raw YAML view contains client tokens in cleartext: admins only.
+    const canYAML = me.role === "admin";
+    $("#cfg-mode-yaml").classList.toggle("hidden", !canYAML);
+    if (!canYAML && state.configMode === "yaml") setConfigMode("form");
     startPolling();
   } catch (e) { /* showLogin already fired on 401 */ }
 }
@@ -470,23 +477,23 @@ function renderStatus(st) {
   $("#restart-btn").classList.toggle("hidden", !canRestart);
 
   const cards = [card("版本", st.version), card("运行时长", fmtUptime(st.uptime_sec))];
+  const liveTitle = $("#live-title");
   let live = "";
+  let showLive = true;
 
   if (st.role === "server" && st.server) {
     const s = st.server;
+    showLive = false;
     cards.push(card("监听地址", s.listen_addr));
-    cards.push(card("TLS", s.tls ? "启用" : "关闭", s.tls ? "ok" : ""));
+    if (s.proxy) cards.push(card("出口代理", s.proxy, "ok"));
     cards.push(card("活跃隧道", String(s.active_tunnels)));
-    cards.push(card("入站流量", fmtBytes(s.bytes_in)));
-    cards.push(card("出站流量", fmtBytes(s.bytes_out)));
-    cards.push(card("decoy 命中", String(s.decoy_views), "warn"));
-    live = table(
-      ["路由", "令牌", "远端", "入站", "出站", "开始时间"],
-      (s.active_streams || []).map((x) => [
-        esc(x.route), esc(x.token), esc(x.remote),
-        fmtBytes(x.bytes_in), fmtBytes(x.bytes_out), fmtMs(x.started_at),
-      ])
-    );
+    cards.push(card("活跃连接", String((s.active_streams || []).length)));
+    cards.push('<div class="card"><div class="k">累计流量</div>' +
+      '<div class="v traffic">' +
+        '<span>入站 ' + esc(fmtBytes(s.bytes_in)) + "</span>" +
+        '<span>出站 ' + esc(fmtBytes(s.bytes_out)) + "</span>" +
+      "</div></div>");
+    cards.push(card("诱饵页访问", String(s.decoy_views), "warn"));
   } else if (st.role === "client" && st.client) {
     const c = st.client;
     const servers = c.servers || [];
@@ -528,8 +535,76 @@ function renderStatus(st) {
         ]));
   }
 
+  liveTitle.classList.toggle("hidden", !showLive);
   $("#summary").innerHTML = cards.join("");
-  $("#live").innerHTML = live;
+  $("#live").innerHTML = showLive ? live : "";
+  updateTrafficPanel(st.role);
+}
+
+/* ---------- daily traffic ---------- */
+
+function updateTrafficPanel(role) {
+  const section = $("#traffic-section");
+  if (role !== "server" && role !== "client") {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+  const isServer = role === "server";
+  $("#traffic-title").textContent = isServer ? "客户端 Token 日流量" : "服务端路由当日流量";
+  $("#traffic-kind").textContent = isServer ? "Token" : "服务端";
+  if (state.trafficRole !== role) {
+    state.trafficRole = role;
+    state.trafficLoadedAt = 0;
+    $("#traffic-filter").innerHTML = '<option value="">全部</option>';
+  }
+  const stale = Date.now() - state.trafficLoadedAt > 30000;
+  if (!state.trafficBusy && (state.trafficLoadedAt === 0 || stale)) loadTraffic();
+}
+
+async function loadTraffic() {
+  if (state.trafficBusy) return;
+  state.trafficBusy = true;
+  try {
+    const role = state.trafficRole;
+    const filter = $("#traffic-filter").value;
+    let url = "api/traffic/daily?limit=20";
+    if (role === "server") url += "&token=" + encodeURIComponent(filter);
+    else url += "&server=" + encodeURIComponent(filter);
+    const data = await api("GET", url);
+    state.trafficLoadedAt = Date.now();
+    renderTraffic(data);
+  } catch (err) {
+    $("#traffic-rows").textContent = "加载失败: " + err.message;
+  } finally {
+    state.trafficBusy = false;
+  }
+}
+
+function renderTraffic(data) {
+  const isServer = data.filter_kind === "token";
+  $("#traffic-day").textContent = data.day ? "统计日期 " + data.day : "";
+  const select = $("#traffic-filter");
+  const current = select.value;
+  const labels = {};
+  (data.filters || []).forEach((f) => { labels[f.key] = f.label; });
+  select.innerHTML = '<option value="">全部</option>' +
+    (data.filters || []).map((f) =>
+      '<option value="' + esc(f.key) + '">' + esc(f.label) + "</option>").join("");
+  if (current && (data.filters || []).some((f) => f.key === current)) select.value = current;
+
+  const rows = (data.rows || []).map((r) => {
+    const name = isServer ? (labels[r.token] || r.token || "-") : (r.server || "-");
+    const total = (r.bytes_in || 0) + (r.bytes_out || 0);
+    return [
+      esc(r.day), esc(name), esc(r.route || "-"),
+      fmtBytes(r.bytes_in), fmtBytes(r.bytes_out), fmtBytes(total),
+    ];
+  });
+  const headers = isServer
+    ? ["日期", "Token", "路由", "入站", "出站", "合计"]
+    : ["日期", "服务端", "路由", "入站", "出站", "合计"];
+  $("#traffic-rows").innerHTML = table(headers, rows);
 }
 
 /* ---------- config ---------- */
@@ -640,8 +715,15 @@ function selectConfigSection(key) {
 
 function fieldHTML(f, value) {
   if (f.type === "table") return tableFieldHTML(f, value || []);
-  const cls = f.type === "bool" ? "form-row form-check" : "form-row";
-  return '<label class="' + cls + '">' +
+  if (f.type === "bool") {
+    return '<div class="form-row form-check">' +
+      '<span class="form-label">' + esc(f.label) + "</span>" +
+      '<label class="check-line">' + inputHTML(f, value, "") +
+        '<span class="muted">勾选启用</span></label>' +
+      (f.help ? '<small class="muted">' + esc(f.help) + "</small>" : "") +
+    "</div>";
+  }
+  return '<label class="form-row">' +
     '<span class="form-label">' + esc(f.label) + "</span>" +
     inputHTML(f, value, "") +
     (f.help ? '<small class="muted">' + esc(f.help) + "</small>" : "") +
@@ -668,6 +750,8 @@ function inputHTML(f, value, colPath) {
         '<option value="' + esc(o) + '"' + (String(value) === o ? " selected" : "") +
         ">" + esc(o) + "</option>").join("") +
       "</select>";
+  case "multiselect":
+    return multiSelectHTML(f, attr, value);
   case "duration":
     return '<input type="text" ' + attr + ' value="' + esc(value ?? "") + '"' + ph + ">";
   default:
@@ -676,7 +760,9 @@ function inputHTML(f, value, colPath) {
 }
 
 function tableFieldHTML(f, rows) {
-  const head = f.columns.map((c) => "<th>" + esc(c.label) + "</th>").join("") + "<th></th>";
+  const head = f.columns.map((c) =>
+    "<th" + (c.type === "bool" ? ' class="col-bool"' : "") + ">" +
+      esc(c.label) + "</th>").join("") + "<th>操作</th>";
   const body = rows.map((row) => tableRowHTML(f, row)).join("");
   return '<div class="form-table-wrap">' +
     '<span class="form-label">' + esc(f.label) + "</span>" +
@@ -693,14 +779,131 @@ function tableFieldHTML(f, rows) {
 function tableRowHTML(f, row) {
   const id = row && row._id != null ? row._id : -1;
   const cells = f.columns.map((c) =>
-    "<td>" + inputHTML(c, row ? row[c.path] : "", c.path) + "</td>").join("");
+    "<td" + (c.type === "bool" ? ' class="col-bool"' : "") + ">" +
+      inputHTML(c, row ? row[c.path] : "", c.path) + "</td>").join("");
   return '<tr data-id="' + id + '">' + cells +
     '<td><button type="button" class="small danger" data-act="del-row">删除</button></td></tr>';
 }
 
 function readInput(el) {
   if (el.type === "checkbox") return el.checked;
+  if (el.classList && el.classList.contains("multi-select")) {
+    return multiSelectChecked(el).join(", ");
+  }
   return el.value;
+}
+
+/* ---------- dropdown multi-select (e.g. listener -> servers) ---------- */
+
+const MULTI_ALL_LABEL = "全部服务端";
+
+function valueList(value) {
+  if (Array.isArray(value)) return value.map((v) => String(v)).filter(Boolean);
+  return String(value == null ? "" : value)
+    .split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// Server names typed into the servers table right now, so the dropdown tracks
+// unsaved renames in the other sub-tab.
+function liveServerNames() {
+  const names = [];
+  document.querySelectorAll('#cfg-form table[data-table="servers"] tbody tr [data-col="name"]')
+    .forEach((el) => {
+      const name = (el.value || "").trim();
+      if (name && !names.includes(name)) names.push(name);
+    });
+  return names;
+}
+
+function multiSelectChecked(ms) {
+  return Array.from(ms.querySelectorAll('.ms-menu input[type="checkbox"]:checked'))
+    .map((el) => el.value).filter(Boolean);
+}
+
+function multiSelectLabel(selected) {
+  return selected.length ? selected.join(", ") : MULTI_ALL_LABEL;
+}
+
+function multiSelectOptionsHTML(selected, options) {
+  const seen = [];
+  (options || []).forEach((o) => {
+    if (o && !seen.includes(o)) seen.push(o);
+  });
+  if (!seen.length) return '<div class="ms-empty">尚未配置服务端</div>';
+  return seen.map((o) =>
+    '<label class="ms-item"><input type="checkbox" value="' + esc(o) + '"' +
+      (selected.includes(o) ? " checked" : "") + "> " + esc(o) + "</label>").join("") +
+    '<div class="ms-actions">' +
+      '<button type="button" class="small ghost" data-ms="all">全选</button>' +
+      '<button type="button" class="small ghost" data-ms="none">清空</button>' +
+    "</div>";
+}
+
+function multiSelectHTML(f, attr, value) {
+  const selected = valueList(value);
+  return '<div class="multi-select" ' + attr + ">" +
+    '<button type="button" class="ms-toggle" aria-haspopup="true" aria-expanded="false">' +
+      '<span class="ms-label">' + esc(multiSelectLabel(selected)) + "</span>" +
+      '<span class="ms-caret" aria-hidden="true">▾</span>' +
+    "</button>" +
+    '<div class="ms-menu hidden">' +
+      multiSelectOptionsHTML(selected, (f.options || []).concat(selected)) +
+    "</div>" +
+  "</div>";
+}
+
+function refreshMultiSelectLabel(ms) {
+  const label = ms.querySelector(".ms-label");
+  if (label) label.textContent = multiSelectLabel(multiSelectChecked(ms));
+}
+
+function openMultiSelect(ms) {
+  const checked = multiSelectChecked(ms);
+  const menu = ms.querySelector(".ms-menu");
+  // Rebuild on open so renamed/added servers from the servers table show up
+  // immediately, while keeping already-checked values selectable.
+  menu.innerHTML = multiSelectOptionsHTML(checked, liveServerNames().concat(checked));
+  menu.classList.remove("hidden");
+  const toggle = ms.querySelector(".ms-toggle");
+  if (toggle) toggle.setAttribute("aria-expanded", "true");
+}
+
+function closeMultiSelects(except) {
+  document.querySelectorAll("#cfg-form .multi-select").forEach((ms) => {
+    if (ms === except) return;
+    const menu = ms.querySelector(".ms-menu");
+    if (menu) menu.classList.add("hidden");
+    const toggle = ms.querySelector(".ms-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
+  });
+}
+
+function multiSelectAction(e) {
+  const ms = e.target.closest(".multi-select");
+  if (!ms) return false;
+  if (e.target.closest(".ms-toggle")) {
+    const menu = ms.querySelector(".ms-menu");
+    const willOpen = menu.classList.contains("hidden");
+    closeMultiSelects(ms);
+    if (willOpen) {
+      openMultiSelect(ms);
+    } else {
+      menu.classList.add("hidden");
+      ms.querySelector(".ms-toggle").setAttribute("aria-expanded", "false");
+    }
+    return true;
+  }
+  const bulk = e.target.closest("[data-ms]");
+  if (bulk) {
+    ms.querySelectorAll('.ms-menu input[type="checkbox"]').forEach((box) => {
+      box.checked = bulk.dataset.ms === "all";
+    });
+    refreshMultiSelectLabel(ms);
+    return true;
+  }
+  // Clicks on items/checkbox labels fall through to the browser so the
+  // checkbox toggles; the change handler updates the summary on the button.
+  return true;
 }
 
 function collectConfigForm() {
@@ -723,6 +926,7 @@ function collectConfigForm() {
 }
 
 function configFormAction(e) {
+  if (multiSelectAction(e)) return;
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
   if (btn.dataset.act === "del-row") {
@@ -797,14 +1001,25 @@ function renderTokens() {
     const route = (t.routes && t.routes.length)
       ? esc(t.routes.join(", "))
       : '<span class="muted">全部</span>';
-    const status = t.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill err">禁用</span>';
+    let status = t.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill err">禁用</span>';
+    if (t.blocked) status += ' <span class="pill err">流量超限</span>';
+    if (t.limit_enabled) {
+      const limits = [];
+      if (t.daily_limit_mb > 0) limits.push("日 " + t.daily_limit_mb + "MB");
+      if (t.weekly_limit_mb > 0) limits.push("周 " + t.weekly_limit_mb + "MB");
+      if (t.monthly_limit_mb > 0) limits.push("月 " + t.monthly_limit_mb + "MB");
+      status += '<br><small class="muted">' +
+        (limits.length ? esc(limits.join(" / ")) : "已启用限流（未设上限）") + "</small>";
+    }
     const secret = t.token_set
       ? '<span class="mono">已设置 ' + esc(t.token_hint || "") + "</span>"
       : '<span class="muted">未设置</span>';
-    const actions = state.role === "admin"
-      ? '<button class="small" data-act="edit" data-index="' + t.index + '">编辑</button> ' +
-        '<button class="small danger" data-act="del" data-index="' + t.index + '">删除</button>'
-      : "";
+    const actions =
+      '<button class="small secondary" data-act="detail" data-index="' + t.index + '">详细</button> ' +
+      (state.role === "admin"
+        ? '<button class="small" data-act="edit" data-index="' + t.index + '">编辑</button> ' +
+          '<button class="small danger" data-act="del" data-index="' + t.index + '">删除</button>'
+        : "");
     return "<tr><td>" + esc(t.name || "（未命名）") + "</td><td>" + route + "</td><td>" +
       status + "</td><td>" + secret + "</td><td>" + actions + "</td></tr>";
   }).join("");
@@ -821,6 +1036,10 @@ function tokenFormOpen(index) {
   $("#token-value").disabled = false;
   $("#token-enabled").checked = t ? t.enabled : true;
   $("#token-generate").checked = false;
+  $("#token-limit-enabled").checked = t ? !!t.limit_enabled : false;
+  $("#token-limit-day").value = t ? t.daily_limit_mb || 0 : 0;
+  $("#token-limit-week").value = t ? t.weekly_limit_mb || 0 : 0;
+  $("#token-limit-month").value = t ? t.monthly_limit_mb || 0 : 0;
   $("#token-hint").textContent = t
     ? "Token 留空表示保持不变；勾选“重新生成”会生成新值。"
     : "Token 留空会自动生成一个随机值，保存后只显示一次。";
@@ -866,6 +1085,10 @@ async function saveToken(e) {
       token: $("#token-value").value,
       enabled: $("#token-enabled").checked,
       generate: $("#token-generate").checked,
+      limit_enabled: $("#token-limit-enabled").checked,
+      daily_limit_mb: Math.max(0, parseInt($("#token-limit-day").value, 10) || 0),
+      weekly_limit_mb: Math.max(0, parseInt($("#token-limit-week").value, 10) || 0),
+      monthly_limit_mb: Math.max(0, parseInt($("#token-limit-month").value, 10) || 0),
     };
     try {
       const rep = index >= 0
@@ -885,6 +1108,10 @@ async function tokenAction(e) {
   const btn = e.target.closest("button[data-act]");
   if (!btn) return;
   const index = Number(btn.dataset.index);
+  if (btn.dataset.act === "detail") {
+    await tokenDetail(index);
+    return;
+  }
   if (btn.dataset.act === "edit") {
     tokenFormOpen(index);
     return;
@@ -901,6 +1128,63 @@ async function tokenAction(e) {
       }
     });
   }
+}
+
+async function tokenDetail(index) {
+  const dlg = $("#token-detail-dialog");
+  const body = $("#token-detail-body");
+  const t = state.tokens.find((x) => x.index === index);
+  $("#token-detail-title").textContent = "Token 详情" + (t && t.name ? " · " + t.name : "");
+  body.textContent = "加载中…";
+  if (!dlg.open) dlg.showModal();
+  try {
+    const data = await api("GET", "api/tokens/" + index + "/traffic?days=14");
+    drawTokenDetail(data);
+  } catch (err) {
+    body.textContent = "加载失败: " + err.message;
+  }
+}
+
+function usageLine(label, u) {
+  if (!u) return [esc(label), "-", "-", "-"];
+  return [
+    esc(label), fmtBytes(u.bytes_in), fmtBytes(u.bytes_out),
+    fmtBytes((u.bytes_in || 0) + (u.bytes_out || 0)),
+  ];
+}
+
+function drawTokenDetail(data) {
+  const t = data.token || {};
+  const usage = data.usage || {};
+  const limit = [];
+  if (t.daily_limit_mb > 0) limit.push("日 " + t.daily_limit_mb + "MB");
+  if (t.weekly_limit_mb > 0) limit.push("周 " + t.weekly_limit_mb + "MB");
+  if (t.monthly_limit_mb > 0) limit.push("月 " + t.monthly_limit_mb + "MB");
+  let statePill = t.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill err">禁用</span>';
+  if (data.blocked || t.blocked) statePill += ' <span class="pill err">流量超限</span>';
+  const summary =
+    '<div class="detail-summary">' +
+      '<div><span class="muted">状态</span><div>' + statePill + "</div></div>" +
+      '<div><span class="muted">专属路由</span><div>' +
+        ((t.routes && t.routes.length) ? esc(t.routes.join(", ")) : "全部") + "</div></div>" +
+      '<div><span class="muted">流量限制</span><div>' +
+        (t.limit_enabled
+          ? (limit.length ? esc(limit.join(" / ")) : "已启用（未设上限）")
+          : "未启用") + "</div></div>" +
+    "</div>" +
+    '<h3 class="muted detail-heading">周期统计</h3>' +
+    table(["周期", "入站", "出站", "合计"], [
+      usageLine("今日", usage.day),
+      usageLine("本周", usage.week),
+      usageLine("本月", usage.month),
+    ]) +
+    '<h3 class="muted detail-heading">最近 ' + (data.days || 14) + ' 天</h3>';
+  const rows = (data.rows || []).map((r) => [
+    esc(r.day), esc(r.route || "-"), fmtBytes(r.bytes_in),
+    fmtBytes(r.bytes_out), fmtBytes((r.bytes_in || 0) + (r.bytes_out || 0)),
+  ]);
+  $("#token-detail-body").innerHTML = summary +
+    table(["日期", "路由", "入站", "出站", "合计"], rows);
 }
 
 /* ---------- ip access ---------- */
@@ -998,6 +1282,52 @@ async function uiPrompt(title, message, placeholder, password) {
   return typeof value === "string" ? value : null;
 }
 
+// passwordDialog asks for the new password twice and only resolves when both
+// fields match (and meet the minimum length). Mismatches keep the dialog open.
+function passwordDialog() {
+  return new Promise((resolve) => {
+    const dlg = $("#password-dialog");
+    const form = $("#password-form");
+    const first = $("#password-new");
+    const second = $("#password-confirm");
+    const err = $("#password-error");
+    first.value = "";
+    second.value = "";
+    err.textContent = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      form.onsubmit = null;
+      dlg.oncancel = null;
+      dlg.close();
+      resolve(value);
+    };
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      const a = first.value;
+      const b = second.value;
+      if (a.length < 8) {
+        err.textContent = "密码至少 8 位";
+        return;
+      }
+      if (a !== b) {
+        err.textContent = "两次输入的密码不一致";
+        return;
+      }
+      err.textContent = "";
+      finish(a);
+    };
+    $("#password-cancel").onclick = () => finish(null);
+    dlg.oncancel = (event) => {
+      event.preventDefault();
+      finish(null);
+    };
+    dlg.showModal();
+    setTimeout(() => first.focus(), 0);
+  });
+}
+
 /* ---------- user menu ---------- */
 
 function setUserMenu(open) {
@@ -1049,7 +1379,7 @@ async function userAction(act, id, extra, btn) {
   await guard(btn, async () => {
     try {
       if (act === "pass") {
-        const pw = await uiPrompt("修改密码", "请输入新密码（至少 8 位）。", "新密码", true);
+        const pw = await passwordDialog();
         if (!pw) return;
         await api("PUT", "api/users/" + id, { password: pw });
         out.textContent = "密码已修改";
@@ -1110,6 +1440,16 @@ $("#cfg-reload").addEventListener("click", () => {
   loadConfig();
 });
 $("#cfg-form").addEventListener("click", configFormAction);
+$("#cfg-form").addEventListener("change", (e) => {
+  const ms = e.target.closest(".multi-select");
+  if (ms && e.target.matches('input[type="checkbox"]')) refreshMultiSelectLabel(ms);
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".multi-select")) closeMultiSelects();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeMultiSelects();
+});
 $("#cfg-subtabs").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-cfg-section]");
   if (btn) selectConfigSection(btn.dataset.cfgSection);
@@ -1124,6 +1464,11 @@ $("#token-generate").addEventListener("change", () => {
   if (generate) $("#token-value").value = "";
 });
 $("#tokens-table").addEventListener("click", tokenAction);
+$("#token-detail-close").addEventListener("click", () => $("#token-detail-dialog").close());
+$("#traffic-filter").addEventListener("change", () => {
+  state.trafficLoadedAt = 0;
+  loadTraffic();
+});
 $("#ip-form").addEventListener("submit", saveIPAccess);
 $("#ip-reload").addEventListener("click", loadIPAccess);
 $("#user-form").addEventListener("submit", createUser);

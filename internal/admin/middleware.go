@@ -81,3 +81,16 @@ func requireWrite(h http.HandlerFunc) http.HandlerFunc {
 		h(w, r)
 	}
 }
+
+// requireAdmin rejects admin-only reads (the raw YAML config, which contains
+// client tokens in cleartext).
+func requireAdmin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, _ := identityFrom(r)
+		if id.user.Role != RoleAdmin || !id.user.Enabled {
+			writeError(w, http.StatusForbidden, "admin role required")
+			return
+		}
+		h(w, r)
+	}
+}

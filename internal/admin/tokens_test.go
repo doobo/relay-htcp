@@ -149,6 +149,94 @@ func TestTokenCreateUpdateDelete(t *testing.T) {
 	}
 }
 
+func TestTokenLimitFields(t *testing.T) {
+	srv, _, p := newTokenEnv(t)
+	on := true
+	day := int64(100)
+	week := int64(500)
+	month := int64(2000)
+	code, raw := doReq(t, srv, http.MethodPut, "/api/tokens/0", "static", tokenRequest{
+		Name: "a", Routes: []string{"ssh"}, LimitEnabled: &on,
+		DailyLimitMB: &day, WeeklyLimitMB: &week, MonthlyLimitMB: &month,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("update limits: %d %s", code, raw)
+	}
+	var cfg config.ServerConfig
+	if err := yaml.Unmarshal([]byte(p.yaml), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Auth.Tokens[0]
+	if !got.LimitEnabled || got.DailyLimitMB != 100 || got.WeeklyLimitMB != 500 || got.MonthlyLimitMB != 2000 {
+		t.Fatalf("limits = %+v", got)
+	}
+
+	var list tokenListResponse
+	_, raw = doReq(t, srv, http.MethodGet, "/api/tokens", "static", nil)
+	_ = json.Unmarshal(raw, &list)
+	if !list.Tokens[0].LimitEnabled || list.Tokens[0].DailyLimitMB != 100 {
+		t.Fatalf("view limits = %+v", list.Tokens[0])
+	}
+
+	// Negative limits are rejected.
+	neg := int64(-1)
+	if code, _ := doReq(t, srv, http.MethodPut, "/api/tokens/0", "static", tokenRequest{
+		DailyLimitMB: &neg,
+	}); code != http.StatusBadRequest {
+		t.Fatalf("negative limit = %d, want 400", code)
+	}
+}
+
+func TestTokenTrafficEndpoints(t *testing.T) {
+	srv, _, _ := newTokenEnv(t)
+	srv.Traffic().Record(TrafficScopeServer, TokenStatsKey("token-a"), "", "ssh", 1024, 2048)
+	srv.Traffic().Record(TrafficScopeServer, TokenStatsKey("token-b"), "", "mysql", 10, 20)
+
+	code, raw := doReq(t, srv, http.MethodGet, "/api/traffic/daily?limit=20", "static", nil)
+	if code != http.StatusOK {
+		t.Fatalf("daily: %d %s", code, raw)
+	}
+	var daily dailyTrafficResponse
+	if err := json.Unmarshal(raw, &daily); err != nil {
+		t.Fatal(err)
+	}
+	if daily.Scope != TrafficScopeServer || daily.FilterKind != "token" || len(daily.Rows) != 2 {
+		t.Fatalf("daily = %+v", daily)
+	}
+	if len(daily.Filters) != 2 {
+		t.Fatalf("filters = %+v", daily.Filters)
+	}
+
+	// Filtering by one token returns only that token's rows.
+	code, raw = doReq(t, srv, http.MethodGet,
+		"/api/traffic/daily?token="+TokenStatsKey("token-a"), "static", nil)
+	if code != http.StatusOK {
+		t.Fatalf("filtered daily: %d %s", code, raw)
+	}
+	var filtered dailyTrafficResponse
+	if err := json.Unmarshal(raw, &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Rows) != 1 || filtered.Rows[0].Token != TokenStatsKey("token-a") {
+		t.Fatalf("filtered rows = %+v", filtered.Rows)
+	}
+
+	code, raw = doReq(t, srv, http.MethodGet, "/api/tokens/0/traffic?days=7", "static", nil)
+	if code != http.StatusOK {
+		t.Fatalf("token traffic: %d %s", code, raw)
+	}
+	var detail tokenTrafficResponse
+	if err := json.Unmarshal(raw, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Token.Name != "a" || len(detail.Rows) != 1 {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if detail.Usage["day"].BytesIn != 1024 || detail.Usage["day"].BytesOut != 2048 {
+		t.Fatalf("usage = %+v", detail.Usage)
+	}
+}
+
 func TestTokenDisabledIsNotBuilt(t *testing.T) {
 	var cfg config.ServerConfig
 	if err := yaml.Unmarshal([]byte(tokenTestYAML), &cfg); err != nil {

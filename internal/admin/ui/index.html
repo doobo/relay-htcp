@@ -70,7 +70,18 @@
   <main>
     <section id="tab-status">
       <div id="summary" class="cards"></div>
-      <h2>实时连接</h2>
+      <div id="traffic-section" class="hidden">
+        <h2 id="traffic-title">当日流量</h2>
+        <div class="traffic-bar">
+          <span class="muted" id="traffic-kind">筛选</span>
+          <select id="traffic-filter" aria-label="流量筛选">
+            <option value="">全部</option>
+          </select>
+          <span class="muted" id="traffic-day"></span>
+        </div>
+        <div id="traffic-rows"></div>
+      </div>
+      <h2 id="live-title">实时连接</h2>
       <div id="live"></div>
     </section>
 
@@ -188,12 +199,57 @@
             </div>
           </div>
         </div>
+        <div class="form-row">
+          <span class="form-label">流量限制（MB，0 = 不限制）</span>
+          <div class="limit-grid">
+            <label class="form-row">
+              <span class="form-label">每日</span>
+              <input id="token-limit-day" type="number" min="0" step="1" value="0">
+            </label>
+            <label class="form-row">
+              <span class="form-label">每周</span>
+              <input id="token-limit-week" type="number" min="0" step="1" value="0">
+            </label>
+            <label class="form-row">
+              <span class="form-label">每月</span>
+              <input id="token-limit-month" type="number" min="0" step="1" value="0">
+            </label>
+          </div>
+          <label class="check-row"><input type="checkbox" id="token-limit-enabled"> 启用流量限制</label>
+          <small class="muted">后台任务按配置的间隔（默认 5 分钟）刷新统计与限制开关。</small>
+        </div>
       </div>
       <p id="token-hint" class="muted"></p>
     </div>
     <div class="dialog-actions">
       <button type="button" id="token-cancel" class="secondary">取消</button>
       <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="token-detail-dialog" class="dialog">
+  <div class="dialog-form">
+    <div class="dialog-head"><h3 id="token-detail-title">Token 详情</h3></div>
+    <div class="dialog-body" id="token-detail-body"></div>
+    <div class="dialog-actions">
+      <button type="button" id="token-detail-close" class="secondary">关闭</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="password-dialog" class="dialog">
+  <form id="password-form" class="dialog-form">
+    <div class="dialog-head"><h3>修改密码</h3></div>
+    <div class="dialog-body">
+      <p class="dialog-message">请输入新密码（至少 8 位），两次输入必须一致。</p>
+      <input id="password-new" type="password" autocomplete="new-password" placeholder="新密码" required>
+      <input id="password-confirm" type="password" autocomplete="new-password" placeholder="再次输入新密码" required>
+      <p id="password-error" class="error" role="alert"></p>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="password-cancel" class="secondary">取消</button>
+      <button type="submit">确定</button>
     </div>
   </form>
 </dialog>

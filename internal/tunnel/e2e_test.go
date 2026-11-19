@@ -140,6 +140,18 @@ func startTunnelClient(t *testing.T, serverAddr string, route string, useTLS boo
 	}
 }
 
+// TestEchoViaURLRouteTarget verifies that route targets may be written as
+// http(s):// URLs and are normalized to host:port for the TCP dial.
+func TestEchoViaURLRouteTarget(t *testing.T) {
+	target, stopTarget := echoTarget(t)
+	defer stopTarget()
+	serverAddr, stopServer := startTunnelServer(t, "http://"+target, false)
+	defer stopServer()
+	local, stopClient := startTunnelClient(t, serverAddr, "echo", false)
+	defer stopClient()
+	testEchoRoundTrip(t, local, "url-target")
+}
+
 func waitForAddr(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

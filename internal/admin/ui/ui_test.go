@@ -35,6 +35,27 @@ func TestHandlerServesAssets(t *testing.T) {
 	if !strings.Contains(string(mustRead(t, h, "/")), "restart-btn") {
 		t.Fatal("index.html is missing the restart button")
 	}
+	if !strings.Contains(string(mustRead(t, h, "/app.js")), "multiSelectHTML") {
+		t.Fatal("app.js is missing the dropdown multi-select widget")
+	}
+	if !strings.Contains(string(mustRead(t, h, "/app.js")), "passwordDialog") {
+		t.Fatal("app.js is missing the two-field password dialog")
+	}
+	if !strings.Contains(string(mustRead(t, h, "/app.js")), "loadTraffic") {
+		t.Fatal("app.js is missing the daily traffic panel")
+	}
+	if !strings.Contains(string(mustRead(t, h, "/style.css")), ".ms-menu") {
+		t.Fatal("style.css is missing the dropdown multi-select styles")
+	}
+	if !strings.Contains(string(mustRead(t, h, "/style.css")), ".traffic-bar") {
+		t.Fatal("style.css is missing the traffic panel styles")
+	}
+	if !strings.Contains(string(mustRead(t, h, "/")), "password-dialog") {
+		t.Fatal("index.html is missing the password dialog")
+	}
+	if !strings.Contains(string(mustRead(t, h, "/")), "traffic-section") {
+		t.Fatal("index.html is missing the traffic section")
+	}
 	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

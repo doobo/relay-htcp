@@ -122,11 +122,12 @@ func applyConfigForm(p Provider, values map[string]any) (string, error) {
 							return "", err
 						}
 						if keep {
-							// An empty CSV list is omitted so the provider sees
+							// An empty list is omitted so the provider sees
 							// the same nil slice as an unset list (e.g. "all
-							// routes") instead of a non-nil empty slice. This
-							// keeps deep-equality hot-apply reports quiet.
-							if col.Type == FormCSV {
+							// routes"/"all servers") instead of a non-nil
+							// empty slice. This keeps deep-equality hot-apply
+							// reports quiet.
+							if col.Type == FormCSV || col.Type == FormMultiSelect {
 								if parts, ok := conv.([]any); ok && len(parts) == 0 {
 									continue
 								}
@@ -181,6 +182,23 @@ func displayValue(f FormField, v any) any {
 			return strings.Join(x, ", ")
 		}
 		return asString(v)
+	case FormMultiSelect:
+		switch x := v.(type) {
+		case []any:
+			out := make([]string, 0, len(x))
+			for _, p := range x {
+				if s := asString(p); s != "" {
+					out = append(out, s)
+				}
+			}
+			return out
+		case []string:
+			return x
+		}
+		if s := asString(v); s != "" {
+			return []string{s}
+		}
+		return []string{}
 	case FormNumber:
 		return v
 	case FormBool:
@@ -199,6 +217,8 @@ func zeroDisplayValue(f FormField) any {
 		return false
 	case FormNumber:
 		return 0
+	case FormMultiSelect:
+		return []string{}
 	default:
 		return ""
 	}
@@ -260,7 +280,7 @@ func convertFormValue(f FormField, raw any) (any, bool, error) {
 			return nil, false, fmt.Errorf("%s: 无效的时长 %q（示例：15s、1m30s）", f.Label, s)
 		}
 		return s, true, nil
-	case FormCSV:
+	case FormCSV, FormMultiSelect:
 		var parts []string
 		switch v := raw.(type) {
 		case string:

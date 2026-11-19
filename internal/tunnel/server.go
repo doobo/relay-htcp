@@ -41,10 +41,25 @@ type tokenEntry struct {
 	raw    string
 	name   string
 	routes map[string]bool // nil = all routes allowed
+	// statsKey identifies this token in the daily traffic table. It is the
+	// configured name, or a digest of the secret for unnamed tokens.
+	statsKey     string
+	limitEnabled bool
+	dailyLimit   int64 // bytes, 0 = unlimited
+	weeklyLimit  int64
+	monthlyLimit int64
 }
 
 func (e *tokenEntry) allows(route string) bool {
 	return e.routes == nil || e.routes[route]
+}
+
+// limitMB converts a configured MB value to bytes.
+func limitMB(mb int64) int64 {
+	if mb <= 0 {
+		return 0
+	}
+	return mb * 1024 * 1024
 }
 
 // streamStat is one live data stream, kept for the admin status view.
@@ -52,6 +67,7 @@ type streamStat struct {
 	id        int64
 	route     string
 	token     string
+	tokenKey  string
 	remote    string
 	bytesIn   int64
 	bytesOut  int64
@@ -90,6 +106,12 @@ type Server struct {
 	listenAddr string
 	st         stats
 	admin      atomic.Pointer[adminMount]
+	// traffic is the shared admin recorder (nil when the panel is disabled).
+	traffic atomic.Pointer[admin.TrafficStats]
+	// blocked is the cached quota state per token stats key. The quota loop
+	// refreshes it periodically; authenticate never queries the database.
+	blocked  atomic.Pointer[map[string]bool]
+	quotaRun sync.Once
 	// rootToAdmin redirects "/" to the admin panel for clients allowed by
 	// adminAllow. Other clients still get the decoy page.
 	rootToAdmin atomic.Bool
@@ -121,7 +143,14 @@ func buildTokens(cfg *config.ServerConfig) []tokenEntry {
 		if !t.On() {
 			continue
 		}
-		e := tokenEntry{raw: t.Token, name: t.Name}
+		e := tokenEntry{
+			raw: t.Token, name: t.Name,
+			statsKey:     admin.TokenStatsKey(t.Token),
+			limitEnabled: t.LimitEnabled,
+			dailyLimit:   limitMB(t.DailyLimitMB),
+			weeklyLimit:  limitMB(t.WeeklyLimitMB),
+			monthlyLimit: limitMB(t.MonthlyLimitMB),
+		}
 		if len(t.Routes) > 0 {
 			e.routes = make(map[string]bool, len(t.Routes))
 			for _, r := range t.Routes {
@@ -133,11 +162,32 @@ func buildTokens(cfg *config.ServerConfig) []tokenEntry {
 	return tokens
 }
 
+// SetTraffic attaches the admin traffic recorder. Call it before Serve.
+func (s *Server) SetTraffic(t *admin.TrafficStats) { s.traffic.Store(t) }
+
+func (s *Server) trafficStats() *admin.TrafficStats { return s.traffic.Load() }
+
+// TokenBlocked reports the cached quota state for a token stats key.
+func (s *Server) TokenBlocked(statsKey string) bool {
+	blocked := s.blocked.Load()
+	if blocked == nil || statsKey == "" {
+		return false
+	}
+	return (*blocked)[statsKey]
+}
+
+// tokenDenied reports whether a token is currently over its traffic limit.
+func (s *Server) tokenDenied(entry *tokenEntry) bool {
+	return entry != nil && s.TokenBlocked(entry.statsKey)
+}
+
 // cfgGet returns the currently effective configuration.
 func (s *Server) cfgGet() *config.ServerConfig { return s.cfg.Load() }
 
-// authenticate checks the Authorization header against every configured
-// token with constant-time comparison, keeping the timing uniform.
+// authenticate checks the Authorization header against the cached token list
+// with constant-time comparison, keeping the timing uniform. The list and the
+// quota blocked set are atomics refreshed on config apply / by the quota task,
+// so authentication never queries the database.
 func (s *Server) authenticate(r *http.Request) (*tokenEntry, bool) {
 	const prefix = "Bearer "
 	auth := r.Header.Get("Authorization")
@@ -176,11 +226,12 @@ func (s *Server) unregisterControl(remote string) {
 }
 
 // registerStream records a live data stream for the admin view.
-func (s *Server) registerStream(route, token, remote string) *streamStat {
+func (s *Server) registerStream(route string, entry *tokenEntry, remote string) *streamStat {
 	ss := &streamStat{
 		id:        time.Now().UnixNano(),
 		route:     route,
-		token:     token,
+		token:     entry.name,
+		tokenKey:  entry.statsKey,
 		remote:    remote,
 		startedAt: time.Now().UnixMilli(),
 	}
@@ -197,6 +248,9 @@ func (s *Server) finishStream(ss *streamStat, in, out int64) {
 	ss.bytesIn, ss.bytesOut = in, out
 	s.st.bytesIn.Add(uint64(in))
 	s.st.bytesOut.Add(uint64(out))
+	if t := s.trafficStats(); t != nil && ss.tokenKey != "" {
+		t.Record(admin.TrafficScopeServer, ss.tokenKey, "", ss.route, in, out)
+	}
 	s.st.mu.Lock()
 	delete(s.st.streams, ss.id)
 	s.st.mu.Unlock()
@@ -293,6 +347,11 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if s.tokenDenied(entry) {
+		s.log.Warn("control: traffic quota exceeded", "token", entry.name, "remote", r.RemoteAddr)
+		http.Error(w, "traffic quota exceeded", http.StatusTooManyRequests)
+		return
+	}
 	n := s.conns.Add(1)
 	if cfg.Tunnel.MaxConnections > 0 && n > int64(cfg.Tunnel.MaxConnections) {
 		s.conns.Add(-1)
@@ -383,6 +442,10 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if s.tokenDenied(entry) {
+		http.Error(w, "traffic quota exceeded", http.StatusTooManyRequests)
+		return
+	}
 	route := r.Header.Get("X-Tunnel-Target")
 	if route == "" {
 		http.Error(w, "missing X-Tunnel-Target", http.StatusBadRequest)
@@ -399,10 +462,9 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dialer := &net.Dialer{Timeout: cfg.Tunnel.DialTimeout}
-	conn, err := dialer.DialContext(r.Context(), "tcp", dest)
+	conn, err := s.dialRoute(r.Context(), cfg, route, dest)
 	if err != nil {
-		s.log.Warn("dial target failed", "route", route, "dest", dest, "err", err)
+		s.log.Warn("dial target failed", "route", route, "dest", dest, "proxy", cfg.Proxy.Enabled && cfg.RouteUsesProxy(route), "err", err)
 		http.Error(w, "target unavailable", http.StatusBadGateway)
 		return
 	}
@@ -417,7 +479,7 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	if fl, ok := w.(http.Flusher); ok {
 		fl.Flush()
 	}
-	ss := s.registerStream(route, entry.name, r.RemoteAddr)
+	ss := s.registerStream(route, entry, r.RemoteAddr)
 
 	in, out, perr := pipeBidir(protocol.NewReader(r.Body), w, conn)
 	s.finishStream(ss, in, out)
@@ -491,6 +553,9 @@ func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 	s.mu.Lock()
 	s.srv = srv
 	s.mu.Unlock()
+
+	// Re-evaluate token traffic limits at startup and periodically.
+	s.startQuotaLoop(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

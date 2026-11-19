@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -58,6 +59,47 @@ func formTestProvider() *formProvider {
 				}},
 			},
 		}},
+	}
+}
+
+// TestMultiSelectDisplayAndConvert covers the dropdown multi-select field type
+// used by listener -> servers: it displays as a string list and accepts either
+// a list or a comma-separated string on save.
+func TestMultiSelectDisplayAndConvert(t *testing.T) {
+	f := FormField{Path: "servers", Label: "选择服务端", Type: FormMultiSelect,
+		Options: []string{"primary", "backup"}}
+
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  []string
+	}{
+		{"yaml list", []any{"primary", "backup"}, []string{"primary", "backup"}},
+		{"string", "primary", []string{"primary"}},
+		{"empty", nil, []string{}},
+	} {
+		got, ok := displayValue(f, tc.value).([]string)
+		if !ok || !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s: displayValue = %#v, want %#v", tc.name, got, tc.want)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		raw  any
+		want []any
+	}{
+		{"csv string", "primary, backup", []any{"primary", "backup"}},
+		{"array", []any{"backup"}, []any{"backup"}},
+		{"stray spaces", " primary ,, backup ", []any{"primary", "backup"}},
+	} {
+		got, keep, err := convertFormValue(f, tc.raw)
+		if err != nil || !keep {
+			t.Fatalf("%s: convertFormValue(%v) = %v, %v, %v", tc.name, tc.raw, got, keep, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s: convertFormValue = %#v, want %#v", tc.name, got, tc.want)
+		}
 	}
 }
 

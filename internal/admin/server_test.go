@@ -289,6 +289,10 @@ func TestRoleEnforcement(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("viewer status: %d", code)
 	}
+	// Raw YAML contains cleartext client tokens: viewers must not read it.
+	if code, _ := doReq(t, srv, http.MethodGet, "/api/config", lr.Token, nil); code != http.StatusForbidden {
+		t.Fatalf("viewer get config yaml: %d, want 403", code)
+	}
 	code, _ = doReq(t, srv, http.MethodPut, "/api/config", lr.Token,
 		configRequest{YAML: "listen: \":1\""})
 	if code != http.StatusForbidden {

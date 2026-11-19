@@ -152,6 +152,7 @@ func openAdmin(ac config.AdminConfig, provider admin.Provider, configPath string
 	}, ui.Handler(), log)
 
 	return asrv, func() {
+		_ = asrv.Traffic().Flush()
 		_ = asrv.Close()
 		_ = store.Close()
 	}
@@ -203,6 +204,8 @@ func runServer(args []string) {
 	if cfg.Admin.Enabled {
 		asrv, stopAdmin := openAdmin(cfg.Admin, srv, usedConfig, log, nil)
 		defer stopAdmin()
+		asrv.Traffic().Start(ctx)
+		srv.SetTraffic(asrv.Traffic())
 		if cfg.Admin.Shared {
 			srv.MountAdmin(cfg.Admin.Path, asrv.Handler())
 			srv.EnableAdminRootRedirect(asrv.Allowlist())
@@ -343,6 +346,8 @@ func runClientOnce(cfgPath string) bool {
 	if cfg.Admin.Enabled {
 		asrv, closeAdmin := openAdmin(cfg.Admin, pool, cfgPath, log, requestRestart)
 		stopAdmin = closeAdmin
+		asrv.Traffic().Start(ctx)
+		pool.SetTraffic(asrv.Traffic())
 		serveAdminStandalone(ctx, asrv, cfg.Admin, log)
 	}
 	if err := pool.StartListeners(ctx); err != nil {

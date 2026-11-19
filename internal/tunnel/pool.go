@@ -19,6 +19,7 @@ import (
 
 	xproxy "golang.org/x/net/proxy"
 
+	"relay-htcp/internal/admin"
 	"relay-htcp/internal/config"
 	"relay-htcp/internal/disguise"
 	"relay-htcp/internal/protocol"
@@ -147,6 +148,10 @@ type Pool struct {
 	spareMu      sync.Mutex
 	spares       map[string][]*xhttpStream
 	spareOpening map[string]bool
+
+	// traffic is the shared admin recorder (nil when the panel is disabled).
+	// Client-side rows are keyed by server name and route.
+	traffic atomic.Pointer[admin.TrafficStats]
 }
 
 // NewPool builds the tunnel connection pools, one set of slots per server.
@@ -179,6 +184,21 @@ func NewPool(cfg *config.ClientConfig, log *slog.Logger) (*Pool, error) {
 
 // cfgGet returns the currently effective configuration.
 func (p *Pool) cfgGet() *config.ClientConfig { return p.cfg.Load() }
+
+// SetTraffic attaches the admin traffic recorder. Call it before Start.
+func (p *Pool) SetTraffic(t *admin.TrafficStats) { p.traffic.Store(t) }
+
+// recordTraffic contributes one finished local connection to the daily
+// per-server/per-route totals.
+func (p *Pool) recordTraffic(server, route string, ac *activeConn) {
+	if ac == nil || server == "" || route == "" {
+		return
+	}
+	if t := p.traffic.Load(); t != nil {
+		t.Record(admin.TrafficScopeClient, "", server, route,
+			ac.bytesIn.Load(), ac.bytesOut.Load())
+	}
+}
 
 // Start launches the keep-alive loop for every slot on every server.
 func (p *Pool) Start(ctx context.Context) {
@@ -437,6 +457,7 @@ func (p *Pool) handleConn(ctx context.Context, conn net.Conn, l config.Listener)
 		p.log.Debug("new local connection", "from", from, "route", l.Target, "server", t.server)
 		start := time.Now()
 		if err := p.OpenStream(ctx, t, l.Target, conn, ac); err == nil {
+			p.recordTraffic(t.server, l.Target, ac)
 			p.log.Info("connection closed", "from", from, "route", l.Target, "server", t.server,
 				"duration", time.Since(start).Round(time.Millisecond))
 			return

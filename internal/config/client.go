@@ -64,15 +64,20 @@ type ClientAuth struct {
 	Token string `yaml:"token"`
 }
 
-// ClientProxy configures an optional outbound HTTP or SOCKS5 proxy used for
-// connections to tunnel servers. It is disabled by default.
-type ClientProxy struct {
+// ProxyConfig configures an optional outbound HTTP or SOCKS5 proxy. It is
+// used by the client for tunnel connections and by the server for routed
+// targets whose route enables use_proxy.
+type ProxyConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Type     string `yaml:"type"`    // http | socks5
 	Address  string `yaml:"address"` // host:port
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 }
+
+// ClientProxy is the historical name of ProxyConfig, kept so existing code
+// and configs that refer to it keep compiling.
+type ClientProxy = ProxyConfig
 
 // Proxy type names.
 const (
@@ -82,7 +87,7 @@ const (
 
 // Normalize validates the proxy settings and accepts a URL in Address
 // (for example http://user:pass@127.0.0.1:7890) as a convenience.
-func (p *ClientProxy) Normalize() error {
+func (p *ProxyConfig) Normalize() error {
 	p.Address = strings.TrimSpace(p.Address)
 	p.Type = strings.ToLower(strings.TrimSpace(p.Type))
 	p.Username = strings.TrimSpace(p.Username)

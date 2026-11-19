@@ -52,8 +52,14 @@ const (
 	FormBool     FormFieldType = "bool"     // checkbox
 	FormDuration FormFieldType = "duration" // Go duration string, e.g. "15s"
 	FormSelect   FormFieldType = "select"
-	FormCSV      FormFieldType = "csv"   // comma-separated string list
-	FormTable    FormFieldType = "table" // repeated rows, described by Columns
+	FormCSV      FormFieldType = "csv" // comma-separated string list
+
+	// FormMultiSelect is a string list edited through a dropdown of
+	// checkboxes. Options are rendered from the field's Options (typically
+	// populated at request time) and the value round-trips as a list.
+	FormMultiSelect FormFieldType = "multiselect"
+
+	FormTable FormFieldType = "table" // repeated rows, described by Columns
 )
 
 // FormField is one editable value or one table column.
@@ -98,6 +104,7 @@ type Status struct {
 type ServerStatus struct {
 	ListenAddr    string       `json:"listen_addr"`
 	TLS           bool         `json:"tls"`
+	Proxy         string       `json:"proxy,omitempty"`
 	ActiveTunnels int          `json:"active_tunnels"`
 	ActiveStreams []StreamStat `json:"active_streams"`
 	BytesIn       uint64       `json:"bytes_in"`

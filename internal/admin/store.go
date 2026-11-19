@@ -145,6 +145,24 @@ CREATE TABLE IF NOT EXISTS settings (
 	value      TEXT NOT NULL,
 	updated_at INTEGER NOT NULL
 );
+
+-- Best-effort daily traffic counters. Scope is 'server' (per client token)
+-- or 'client' (per configured server and route). Counters are accumulated in
+-- memory and flushed in batches; a crash may drop the last few seconds.
+CREATE TABLE IF NOT EXISTS traffic_daily (
+	scope      TEXT NOT NULL,
+	token      TEXT NOT NULL DEFAULT '',
+	server     TEXT NOT NULL DEFAULT '',
+	route      TEXT NOT NULL DEFAULT '',
+	day        TEXT NOT NULL,
+	bytes_in   INTEGER NOT NULL DEFAULT 0,
+	bytes_out  INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (scope, token, server, route, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_day ON traffic_daily(scope, day);
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_token ON traffic_daily(scope, token, day);
 `
 
 // Migrate applies the baseline schema. It is idempotent and safe to run on

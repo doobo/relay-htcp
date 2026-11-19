@@ -155,6 +155,129 @@ func socks5Serve(c net.Conn, onConnect func()) error {
 	return nil
 }
 
+func TestServerRouteProxyHTTP(t *testing.T) {
+	target, stopTarget := echoTarget(t)
+	defer stopTarget()
+	proxyAddr, hits, stopProxy := startHTTPConnectProxy(t)
+	defer stopProxy()
+
+	cfg := &config.ServerConfig{
+		Listen: "127.0.0.1:0",
+		Auth:   config.AuthConfig{Tokens: []config.Token{{Name: "t", Token: "token"}}},
+		Routes: []config.Route{
+			{Name: "direct", Target: target},
+			{Name: "proxied", Target: target, UseProxy: true},
+		},
+		Proxy: config.ProxyConfig{Enabled: true, Type: config.ProxyHTTP, Address: proxyAddr},
+	}
+	cfg.Tunnel.DialTimeout = 5 * time.Second
+	cfg.Tunnel.IdleTimeout = time.Minute
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(cfg, testLogger())
+
+	roundTrip := func(route string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, err := s.dialRoute(ctx, cfg, route, target)
+		if err != nil {
+			t.Fatalf("dial %s: %v", route, err)
+		}
+		defer conn.Close()
+		if _, err := conn.Write([]byte("hi")); err != nil {
+			t.Fatalf("write %s: %v", route, err)
+		}
+		buf := make([]byte, 16)
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Fatalf("read %s: %v", route, err)
+		}
+		if got := string(buf[:n]); got != "echo:hi" {
+			t.Fatalf("%s response = %q", route, got)
+		}
+	}
+
+	roundTrip("proxied")
+	if hits.Load() != 1 {
+		t.Fatalf("proxy hits = %d, want 1", hits.Load())
+	}
+	roundTrip("direct")
+	if hits.Load() != 1 {
+		t.Fatalf("direct route used the proxy: hits = %d", hits.Load())
+	}
+}
+
+func TestServerRouteProxySOCKS5(t *testing.T) {
+	target, stopTarget := echoTarget(t)
+	defer stopTarget()
+	proxyAddr, hits, stopProxy := startSOCKS5Proxy(t)
+	defer stopProxy()
+
+	cfg := &config.ServerConfig{
+		Listen: "127.0.0.1:0",
+		Auth:   config.AuthConfig{Tokens: []config.Token{{Name: "t", Token: "token"}}},
+		Routes: []config.Route{{Name: "proxied", Target: target, UseProxy: true}},
+		Proxy:  config.ProxyConfig{Enabled: true, Type: config.ProxySOCKS5, Address: proxyAddr},
+	}
+	cfg.Tunnel.DialTimeout = 5 * time.Second
+	cfg.Tunnel.IdleTimeout = time.Minute
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(cfg, testLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := s.dialRoute(ctx, cfg, "proxied", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("socks")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 32)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(buf[:n]); got != "echo:socks" {
+		t.Fatalf("response = %q", got)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("proxy hits = %d, want 1", hits.Load())
+	}
+}
+
+func TestServerRouteProxyDisabledStaysDirect(t *testing.T) {
+	target, stopTarget := echoTarget(t)
+	defer stopTarget()
+
+	cfg := &config.ServerConfig{
+		Listen: "127.0.0.1:0",
+		Auth:   config.AuthConfig{Tokens: []config.Token{{Name: "t", Token: "token"}}},
+		Routes: []config.Route{{Name: "r", Target: target, UseProxy: true}},
+		// UseProxy is set, but the global proxy is disabled, so dialing must
+		// still reach the target directly.
+		Proxy: config.ProxyConfig{Enabled: false, Address: "127.0.0.1:1"},
+	}
+	cfg.Tunnel.DialTimeout = 5 * time.Second
+	cfg.Tunnel.IdleTimeout = time.Minute
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(cfg, testLogger())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := s.dialRoute(ctx, cfg, "r", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+}
+
 func startClientWithProxy(t *testing.T, serverAddr string, tlsSkip bool, proxy config.ClientProxy) (localAddr string, stop func()) {
 	t.Helper()
 	cfg := &config.ClientConfig{

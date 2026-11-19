@@ -159,10 +159,9 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dialer := &net.Dialer{Timeout: cfg.Tunnel.DialTimeout}
-	conn, err := dialer.DialContext(r.Context(), "tcp", dest)
+	conn, err := s.dialRoute(r.Context(), cfg, route, dest)
 	if err != nil {
-		s.log.Warn("xhttp: dial target failed", "route", route, "dest", dest, "err", err)
+		s.log.Warn("xhttp: dial target failed", "route", route, "dest", dest, "proxy", cfg.Proxy.Enabled && cfg.RouteUsesProxy(route), "err", err)
 		http.Error(w, "target unavailable", http.StatusBadGateway)
 		return
 	}
@@ -188,7 +187,7 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("xhttp: duplicate session", "session", id, "token", entry.name)
 		return
 	}
-	ss.stat = s.registerStream(route, entry.name, r.RemoteAddr)
+	ss.stat = s.registerStream(route, entry, r.RemoteAddr)
 	// Flush any proxy/CDN response buffer before real data can be tiny.
 	padding := make([]byte, xhttpPaddingBytes)
 	_ = ss.send(&protocol.Frame{Type: protocol.TypeNoop, Payload: padding})

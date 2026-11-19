@@ -187,6 +187,13 @@ func (p *Pool) CurrentConfigYAML() string {
 // up in the panel's structured editor automatically. Sections with a Key are
 // rendered as sub-tabs in the client config page.
 func (p *Pool) ConfigFormSchema() admin.FormSchema {
+	// Options for listeners[].servers: the server names currently configured.
+	// The panel also merges names edited in the servers table, so options stay
+	// correct when both sections are saved together.
+	serverNames := make([]string, 0, len(p.servers))
+	for _, srv := range p.servers {
+		serverNames = append(serverNames, srv.name)
+	}
 	return admin.FormSchema{Sections: []admin.FormSection{
 		{
 			Title: "服务端",
@@ -229,11 +236,12 @@ func (p *Pool) ConfigFormSchema() admin.FormSchema {
 			Key:   "listeners",
 			Fields: []admin.FormField{
 				{Path: "listeners", Label: "监听列表", Type: admin.FormTable,
-					Help: "servers 留空 = 所有服务端；多个服务端用英文逗号分隔。",
+					Help: "每条监听一行；选择服务端留空 = 使用全部服务端。",
 					Columns: []admin.FormField{
 						{Path: "local", Label: "本地地址", Type: admin.FormText, Placeholder: "127.0.0.1:2222"},
 						{Path: "target", Label: "服务端路由", Type: admin.FormText, Placeholder: "ssh"},
-						{Path: "servers", Label: "选择服务端", Type: admin.FormCSV, Placeholder: "primary, backup"},
+						{Path: "servers", Label: "选择服务端", Type: admin.FormMultiSelect, Options: serverNames,
+							Help: "下拉多选；留空 = 全部服务端"},
 						{Path: "strategy", Label: "选择策略", Type: admin.FormSelect, Options: []string{"round_robin", "failover"}},
 					}},
 			},

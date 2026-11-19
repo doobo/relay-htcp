@@ -26,6 +26,14 @@ type clientTokenView struct {
 	Enabled   bool     `json:"enabled"`
 	TokenSet  bool     `json:"token_set"`
 	TokenHint string   `json:"token_hint,omitempty"`
+	// StatsKey is the non-secret identity used by the daily traffic table.
+	StatsKey string `json:"-"`
+	// Per-token traffic limits (MB, 0 = unlimited) and their runtime switch.
+	LimitEnabled   bool  `json:"limit_enabled"`
+	DailyLimitMB   int64 `json:"daily_limit_mb"`
+	WeeklyLimitMB  int64 `json:"weekly_limit_mb"`
+	MonthlyLimitMB int64 `json:"monthly_limit_mb"`
+	Blocked        bool  `json:"blocked"`
 }
 
 type tokenListResponse struct {
@@ -49,6 +57,11 @@ type tokenRequest struct {
 	Token    string   `json:"token"`
 	Enabled  *bool    `json:"enabled"`
 	Generate bool     `json:"generate"`
+
+	LimitEnabled   *bool  `json:"limit_enabled"`
+	DailyLimitMB   *int64 `json:"daily_limit_mb"`
+	WeeklyLimitMB  *int64 `json:"weekly_limit_mb"`
+	MonthlyLimitMB *int64 `json:"monthly_limit_mb"`
 }
 
 // effectiveRoutes merges the multi-select field with the legacy single route.
@@ -99,9 +112,21 @@ func (a *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tokenListResponse{
-		Tokens: listTokenViews(doc),
+		Tokens: a.tokenViews(doc),
 		Routes: routeNames(doc),
 	})
+}
+
+// tokenViews projects the config into API-safe token views and stamps the
+// cached runtime quota state. It never reads the database.
+func (a *Server) tokenViews(doc map[string]any) []clientTokenView {
+	views := listTokenViews(doc)
+	if p, ok := a.provider.(TokenBlockProvider); ok {
+		for i := range views {
+			views[i].Blocked = p.TokenBlocked(views[i].StatsKey)
+		}
+	}
+	return views
 }
 
 func (a *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +165,10 @@ func (a *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if routes := req.effectiveRoutes(); len(routes) > 0 {
 		row["routes"] = stringSliceAny(routes)
 	}
+	if err := applyTokenLimits(row, req, true); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	rows = append(rows, row)
 	assignPath(doc, "auth.tokens", rows)
 
@@ -150,7 +179,7 @@ func (a *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	canon, _ := parseConfigDoc(a.provider.CurrentConfigYAML())
 	writeJSON(w, http.StatusOK, tokenSaveResponse{
-		Token: generated, Tokens: listTokenViews(canon), Routes: routeNames(canon), Report: report,
+		Token: generated, Tokens: a.tokenViews(canon), Routes: routeNames(canon), Report: report,
 	})
 }
 
@@ -211,6 +240,10 @@ func (a *Server) handleUpdateToken(w http.ResponseWriter, r *http.Request) {
 		row["token"] = strings.TrimSpace(req.Token)
 		// otherwise keep the existing token
 	}
+	if err := applyTokenLimits(row, req, false); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	rows[index] = row
 	assignPath(doc, "auth.tokens", rows)
 
@@ -221,7 +254,7 @@ func (a *Server) handleUpdateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	canon, _ := parseConfigDoc(a.provider.CurrentConfigYAML())
 	writeJSON(w, http.StatusOK, tokenSaveResponse{
-		Token: generated, Tokens: listTokenViews(canon), Routes: routeNames(canon), Report: report,
+		Token: generated, Tokens: a.tokenViews(canon), Routes: routeNames(canon), Report: report,
 	})
 }
 
@@ -261,7 +294,7 @@ func (a *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 	}
 	canon, _ := parseConfigDoc(a.provider.CurrentConfigYAML())
 	writeJSON(w, http.StatusOK, tokenSaveResponse{
-		Tokens: listTokenViews(canon), Routes: routeNames(canon), Report: report,
+		Tokens: a.tokenViews(canon), Routes: routeNames(canon), Report: report,
 	})
 }
 
@@ -326,6 +359,12 @@ func listTokenViews(doc map[string]any) []clientTokenView {
 		if enabled, ok := row["enabled"].(bool); ok {
 			view.Enabled = enabled
 		}
+		if limit, ok := row["limit_enabled"].(bool); ok {
+			view.LimitEnabled = limit
+		}
+		view.DailyLimitMB = asInt64(row["daily_limit_mb"])
+		view.WeeklyLimitMB = asInt64(row["weekly_limit_mb"])
+		view.MonthlyLimitMB = asInt64(row["monthly_limit_mb"])
 		switch routes := row["routes"].(type) {
 		case []any:
 			for _, r := range routes {
@@ -342,6 +381,7 @@ func listTokenViews(doc map[string]any) []clientTokenView {
 		}
 		if secret := asString(row["token"]); secret != "" {
 			view.TokenSet = true
+			view.StatsKey = TokenStatsKey(secret)
 			if len(secret) > 4 {
 				view.TokenHint = "…" + secret[len(secret)-4:]
 			} else {
@@ -382,4 +422,70 @@ func enabledValue(p *bool, def bool) bool {
 		return def
 	}
 	return *p
+}
+
+// applyTokenLimits writes the optional quota fields into a config row. On
+// create (create=true) explicit false/zero values can simply be omitted; on
+// update only fields present in the request are touched so a partial API
+// caller cannot silently clear existing limits.
+func applyTokenLimits(row map[string]any, req tokenRequest, create bool) error {
+	type limitField struct {
+		key   string
+		value *int64
+		label string
+	}
+	enabled := req.LimitEnabled
+	if enabled != nil {
+		if *enabled {
+			row["limit_enabled"] = true
+		} else {
+			delete(row, "limit_enabled")
+		}
+	} else if create {
+		delete(row, "limit_enabled")
+	}
+	for _, f := range []limitField{
+		{"daily_limit_mb", req.DailyLimitMB, "日流量上限"},
+		{"weekly_limit_mb", req.WeeklyLimitMB, "周流量上限"},
+		{"monthly_limit_mb", req.MonthlyLimitMB, "月流量上限"},
+	} {
+		if f.value == nil {
+			continue
+		}
+		if *f.value < 0 {
+			return &tokenLimitError{f.label + "不能为负数"}
+		}
+		if *f.value == 0 {
+			delete(row, f.key)
+			continue
+		}
+		row[f.key] = *f.value
+	}
+	return nil
+}
+
+type tokenLimitError struct{ msg string }
+
+func (e *tokenLimitError) Error() string { return e.msg }
+
+func asInt64(v any) int64 {
+	switch x := v.(type) {
+	case int:
+		return int64(x)
+	case int32:
+		return int64(x)
+	case int64:
+		return x
+	case uint:
+		return int64(x)
+	case uint64:
+		return int64(x)
+	case float64:
+		return int64(x)
+	case string:
+		n, _ := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		return n
+	default:
+		return 0
+	}
 }

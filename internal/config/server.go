@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -18,12 +20,14 @@ type ServerConfig struct {
 	TLS      TLSConfig      `yaml:"tls"`
 	Auth     AuthConfig     `yaml:"auth"`
 	Routes   []Route        `yaml:"routes"`
+	Proxy    ProxyConfig    `yaml:"proxy"`
 	Tunnel   TunnelServer   `yaml:"tunnel"`
 	Disguise DisguiseConfig `yaml:"disguise"`
 	Log      LogConfig      `yaml:"log"`
 	Admin    AdminConfig    `yaml:"admin"`
 
 	routeTable map[string]string // name -> target, built by Validate
+	routeProxy map[string]bool   // name -> use_proxy, built by Validate
 }
 
 // TLSConfig configures the TLS listener. When Cert and Key are empty the
@@ -44,6 +48,13 @@ type Token struct {
 	// Enabled defaults to true. A disabled token is kept in the config but
 	// never authenticates.
 	Enabled *bool `yaml:"enabled,omitempty"`
+	// Traffic limits in MB per calendar day/week/month. Zero means unlimited.
+	// LimitEnabled turns the runtime quota switch on; a background task
+	// recomputes the blocked state from the daily traffic table.
+	LimitEnabled   bool  `yaml:"limit_enabled,omitempty"`
+	DailyLimitMB   int64 `yaml:"daily_limit_mb,omitempty"`
+	WeeklyLimitMB  int64 `yaml:"weekly_limit_mb,omitempty"`
+	MonthlyLimitMB int64 `yaml:"monthly_limit_mb,omitempty"`
 }
 
 // On reports whether the token may authenticate (default true).
@@ -58,6 +69,9 @@ type AuthConfig struct {
 type Route struct {
 	Name   string `yaml:"name"`
 	Target string `yaml:"target"`
+	// UseProxy sends this route's dials through the server-wide proxy when
+	// one is enabled. Other routes keep dialing directly.
+	UseProxy bool `yaml:"use_proxy,omitempty"`
 }
 
 // TunnelServer tunes server-side tunnel behaviour.
@@ -70,6 +84,9 @@ type TunnelServer struct {
 	// Defaults to /relay; change it when another service already owns that
 	// prefix on the same domain.
 	XHTTPPath string `yaml:"xhttp_path"`
+	// QuotaRefresh is how often token traffic limits are re-evaluated.
+	// Defaults to 5m.
+	QuotaRefresh time.Duration `yaml:"quota_refresh"`
 }
 
 // DisguiseConfig toggles camouflage behaviour. Enabled defaults to true.
@@ -115,7 +132,8 @@ func (c *ServerConfig) Validate() error {
 		return fmt.Errorf("auth.tokens: at least one token required")
 	}
 	seen := map[string]bool{}
-	for _, t := range c.Auth.Tokens {
+	for i := range c.Auth.Tokens {
+		t := &c.Auth.Tokens[i]
 		if t.Token == "" {
 			return fmt.Errorf("auth.tokens: empty token value (name=%q)", t.Name)
 		}
@@ -123,11 +141,15 @@ func (c *ServerConfig) Validate() error {
 			return fmt.Errorf("auth.tokens: duplicate token (name=%q)", t.Name)
 		}
 		seen[t.Token] = true
+		if t.DailyLimitMB < 0 || t.WeeklyLimitMB < 0 || t.MonthlyLimitMB < 0 {
+			return fmt.Errorf("auth.tokens: traffic limits must not be negative (name=%q)", t.Name)
+		}
 	}
 	if len(c.Routes) == 0 {
 		return fmt.Errorf("routes: at least one route required")
 	}
 	c.routeTable = make(map[string]string, len(c.Routes))
+	c.routeProxy = make(map[string]bool, len(c.Routes))
 	seenRoutes := map[string]bool{}
 	for _, r := range c.Routes {
 		if r.Name == "" || r.Target == "" {
@@ -137,7 +159,15 @@ func (c *ServerConfig) Validate() error {
 			return fmt.Errorf("routes: duplicate name %q", r.Name)
 		}
 		seenRoutes[r.Name] = true
-		c.routeTable[r.Name] = r.Target
+		addr, err := TargetAddress(r.Target)
+		if err != nil {
+			return fmt.Errorf("routes: target for %q: %w", r.Name, err)
+		}
+		c.routeTable[r.Name] = addr
+		c.routeProxy[r.Name] = r.UseProxy
+	}
+	if err := c.Proxy.Normalize(); err != nil {
+		return fmt.Errorf("proxy: %w", err)
 	}
 	// Each route referenced by a token must exist.
 	for _, t := range c.Auth.Tokens {
@@ -155,6 +185,9 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.Tunnel.IdleTimeout <= 0 {
 		c.Tunnel.IdleTimeout = 90 * time.Second
+	}
+	if c.Tunnel.QuotaRefresh <= 0 {
+		c.Tunnel.QuotaRefresh = 5 * time.Minute
 	}
 	xhttpPath, err := NormalizeXHTTPPath(c.Tunnel.XHTTPPath)
 	if err != nil {
@@ -219,8 +252,6 @@ func BootstrapServer() (*ServerConfig, error) {
 }
 
 // DefaultXHTTPPath is the default prefix for the xhttp transport endpoints.
-// /relay is used instead of the common /xhttp so an existing Xray inbound can
-// keep its own /xhttp namespace on the same domain.
 const DefaultXHTTPPath = "/relay"
 
 // NormalizeXHTTPPath validates and normalizes a path prefix such as /relay.
@@ -242,8 +273,58 @@ func NormalizeXHTTPPath(p string) (string, error) {
 	return p, nil
 }
 
-// RouteTarget returns the local target for a route name.
+// RouteTarget returns the local target for a route name. URL targets are
+// normalized to a dialable host:port (https -> 443, http -> 80).
 func (c *ServerConfig) RouteTarget(name string) (string, bool) {
 	t, ok := c.routeTable[name]
 	return t, ok
+}
+
+// TargetAddress turns a route target into a dialable host:port. Besides the
+// classic "host:port" form it accepts http:// and https:// URLs so operators
+// can paste an upstream URL; only scheme/host/port take part in the TCP
+// dial, the path must be empty (or "/").
+func TargetAddress(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", fmt.Errorf("target is empty")
+	}
+	if !strings.Contains(target, "://") {
+		if _, _, err := net.SplitHostPort(target); err != nil {
+			return "", fmt.Errorf("must be host:port or http(s)://host[:port]: %w", err)
+		}
+		return target, nil
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return "", err
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("unsupported scheme %q (use http or https)", u.Scheme)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("userinfo is not supported in route targets")
+	}
+	if u.Hostname() == "" {
+		return "", fmt.Errorf("missing host")
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("path/query/fragment are not supported for TCP routes")
+	}
+	port := u.Port()
+	if port == "" {
+		if strings.EqualFold(u.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), port), nil
+}
+
+// RouteUsesProxy reports whether a route opted into the server-wide proxy.
+func (c *ServerConfig) RouteUsesProxy(name string) bool {
+	return c.routeProxy[name]
 }

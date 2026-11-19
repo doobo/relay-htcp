@@ -73,6 +73,7 @@ type Server struct {
 	allowlist  *IPAllowlist
 	challenges *challengeStore
 	ipRules    atomic.Pointer[ipRules]
+	traffic    *TrafficStats
 	started    time.Time
 	// configMu serializes read-modify-write updates of the config YAML
 	// (form saves and token CRUD).
@@ -97,6 +98,7 @@ func NewServer(store *Store, provider Provider, opts Options, ui http.Handler, l
 		challenges: newChallengeStore(),
 		started:    time.Now(),
 	}
+	a.traffic = NewTrafficStats(store, log)
 	if settings, err := store.LoadIPAccess(); err != nil {
 		log.Warn("load ip access rules, using empty rules", "err", err)
 	} else if rules, perr := parseIPAccess(settings); perr != nil {
@@ -109,6 +111,10 @@ func NewServer(store *Store, provider Provider, opts Options, ui http.Handler, l
 
 // Store exposes the underlying store (used by main for seeding).
 func (a *Server) Store() *Store { return a.store }
+
+// Traffic exposes the shared traffic recorder. Both the admin API and the
+// role provider (tunnel server/client) record into the same instance.
+func (a *Server) Traffic() *TrafficStats { return a.traffic }
 
 // Allowlist exposes the panel IP allowlist (nil means unrestricted).
 func (a *Server) Allowlist() *IPAllowlist { return a.allowlist }
@@ -124,14 +130,16 @@ func (a *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/auth/logout", a.handleLogout)
 	api.HandleFunc("GET /api/status", a.handleStatus)
 	api.HandleFunc("POST /api/restart", requireWrite(a.handleRestart))
-	api.HandleFunc("GET /api/config", a.handleGetConfig)
+	api.HandleFunc("GET /api/config", requireAdmin(a.handleGetConfig))
 	api.HandleFunc("PUT /api/config", requireWrite(a.handlePutConfig))
 	api.HandleFunc("GET /api/config/form", a.handleGetConfigForm)
 	api.HandleFunc("PUT /api/config/form", requireWrite(a.handlePutConfigForm))
 	api.HandleFunc("GET /api/tokens", a.handleListTokens)
+	api.HandleFunc("GET /api/tokens/{index}/traffic", a.handleTokenTraffic)
 	api.HandleFunc("POST /api/tokens", requireWrite(a.handleCreateToken))
 	api.HandleFunc("PUT /api/tokens/{index}", requireWrite(a.handleUpdateToken))
 	api.HandleFunc("DELETE /api/tokens/{index}", requireWrite(a.handleDeleteToken))
+	api.HandleFunc("GET /api/traffic/daily", a.handleDailyTraffic)
 	api.HandleFunc("GET /api/ip-access", a.handleGetIPAccess)
 	api.HandleFunc("PUT /api/ip-access", requireWrite(a.handlePutIPAccess))
 	api.HandleFunc("GET /api/users", a.handleListUsers)
@@ -210,6 +218,10 @@ func (a *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 	srv := a.srv
 	a.mu.Unlock()
+
+	// Periodic daily-traffic flush. Start is idempotent, so a standalone
+	// listener, a mounted handler in main and tests can all call it.
+	a.traffic.Start(ctx)
 
 	go func() {
 		ticker := time.NewTicker(time.Minute)

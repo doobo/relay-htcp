@@ -36,17 +36,21 @@ func (s *Server) Status() admin.Status {
 	}
 	controls := len(s.st.controls)
 	s.st.mu.Unlock()
+	st := admin.ServerStatus{
+		ListenAddr:    s.listenAddr,
+		TLS:           cfg.TLS.Enabled(),
+		ActiveTunnels: controls,
+		ActiveStreams: streams,
+		BytesIn:       s.st.bytesIn.Load(),
+		BytesOut:      s.st.bytesOut.Load(),
+		DecoyViews:    disguise.Views(),
+	}
+	if cfg.Proxy.Enabled {
+		st.Proxy = cfg.Proxy.Type + "://" + cfg.Proxy.Address
+	}
 	return admin.Status{
-		Role: "server",
-		Server: &admin.ServerStatus{
-			ListenAddr:    s.listenAddr,
-			TLS:           cfg.TLS.Enabled(),
-			ActiveTunnels: controls,
-			ActiveStreams: streams,
-			BytesIn:       s.st.bytesIn.Load(),
-			BytesOut:      s.st.bytesOut.Load(),
-			DecoyViews:    disguise.Views(),
-		},
+		Role:   "server",
+		Server: &st,
 	}
 }
 
@@ -105,6 +109,9 @@ func (s *Server) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	if !reflect.DeepEqual(old.Routes, newCfg.Routes) {
 		report.Applied = append(report.Applied, "routes")
 	}
+	if old.Proxy != newCfg.Proxy {
+		report.Applied = append(report.Applied, "proxy")
+	}
 	if old.Tunnel.DialTimeout != newCfg.Tunnel.DialTimeout ||
 		old.Tunnel.IdleTimeout != newCfg.Tunnel.IdleTimeout ||
 		old.Tunnel.MaxConnections != newCfg.Tunnel.MaxConnections {
@@ -116,6 +123,12 @@ func (s *Server) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	if old.Tunnel.XHTTPPath != newCfg.Tunnel.XHTTPPath {
 		report.Applied = append(report.Applied, "tunnel.xhttp_path")
 	}
+	if old.Tunnel.QuotaRefresh != newCfg.Tunnel.QuotaRefresh {
+		report.Applied = append(report.Applied, "tunnel.quota_refresh")
+	}
+	// Token limits may have changed: recompute the cached blocked set now
+	// instead of waiting for the next background tick.
+	s.refreshTokenLimits()
 	return report, nil
 }
 
@@ -148,17 +161,33 @@ func (s *Server) ConfigFormSchema() admin.FormSchema {
 				{Path: "tunnel.max_connections", Label: "在线控制连接上限", Type: admin.FormNumber, Help: "0 表示不限制"},
 				{Path: "tunnel.dial_timeout", Label: "内网拨号超时", Type: admin.FormDuration, Placeholder: "10s"},
 				{Path: "tunnel.idle_timeout", Label: "控制流空闲超时", Type: admin.FormDuration, Placeholder: "90s"},
-				{Path: "tunnel.xhttp_path", Label: "xhttp 路径", Type: admin.FormText, Placeholder: "/relay", Help: "默认 /relay，需与客户端 servers[].xhttp_path 一致；避免与 Xray 等服务的 /xhttp 冲突"},
+				{Path: "tunnel.xhttp_path", Label: "xhttp 路径", Type: admin.FormText, Placeholder: "/relay", Help: "默认 /relay，需与客户端 servers[].xhttp_path 一致"},
+				{Path: "tunnel.quota_refresh", Label: "Token 流量限制刷新间隔", Type: admin.FormDuration, Placeholder: "5m", Help: "定时按日/周/月统计刷新每个 Token 的限制开关"},
 				{Path: "disguise.enabled", Label: "启用伪装（诱饵页与响应头）", Type: admin.FormBool},
+			},
+		},
+		{
+			Title: "出口代理",
+			Fields: []admin.FormField{
+				{Path: "proxy.enabled", Label: "启用服务端出口代理", Type: admin.FormBool,
+					Help: "只影响下面勾选了“走代理”的内网路由"},
+				{Path: "proxy.type", Label: "代理类型", Type: admin.FormSelect, Options: []string{"http", "socks5"}},
+				{Path: "proxy.address", Label: "代理地址", Type: admin.FormText, Placeholder: "127.0.0.1:7890",
+					Help: "host:port；HTTP 代理使用 CONNECT，SOCKS5 直接转发"},
+				{Path: "proxy.username", Label: "代理用户名（可选）", Type: admin.FormText},
+				{Path: "proxy.password", Label: "代理密码（可选）", Type: admin.FormSecret, Placeholder: "留空保持不变"},
 			},
 		},
 		{
 			Title: "内网路由",
 			Fields: []admin.FormField{
-				{Path: "routes", Label: "路由列表", Type: admin.FormTable, Columns: []admin.FormField{
-					{Path: "name", Label: "路由名", Type: admin.FormText, Placeholder: "ssh"},
-					{Path: "target", Label: "内网目标", Type: admin.FormText, Placeholder: "127.0.0.1:22"},
-				}},
+				{Path: "routes", Label: "路由列表", Type: admin.FormTable,
+					Help: "内网目标支持 host:port 或 http(s)://host[:port]（URL 仅用于确定目标主机和端口，路径不参与 TCP 转发）；勾选“走代理”的路由才会使用上面的出口代理。",
+					Columns: []admin.FormField{
+						{Path: "name", Label: "路由名", Type: admin.FormText, Placeholder: "ssh"},
+						{Path: "target", Label: "内网目标", Type: admin.FormText, Placeholder: "127.0.0.1:22 或 https://host"},
+						{Path: "use_proxy", Label: "走代理", Type: admin.FormBool},
+					}},
 			},
 		},
 	}}
