@@ -45,6 +45,14 @@ type xhttpSession struct {
 	sendMu  sync.Mutex // serializes writes to the download response
 	writeMu sync.Mutex // serializes writes to the target connection
 
+	// sendClosed is guarded by sendMu and set before the download handler
+	// returns. A net/http ResponseWriter is only usable while its handler is
+	// running: writing after it returns makes HTTP/2 panic with "Header called
+	// after Handler finished" in whatever goroutine does the write. Holding
+	// sendMu to set the flag also covers the case where a write is already in
+	// flight, because the handler cannot return before that write finishes.
+	sendClosed bool
+
 	// Upload batches may arrive out of order once the client pipelines them:
 	// upNext is the next sequence number to apply and upPending holds batches
 	// that arrived early.
@@ -63,6 +71,9 @@ type xhttpSession struct {
 func (ss *xhttpSession) send(f *protocol.Frame) error {
 	ss.sendMu.Lock()
 	defer ss.sendMu.Unlock()
+	if ss.sendClosed {
+		return net.ErrClosed
+	}
 	select {
 	case <-ss.done:
 		return net.ErrClosed
@@ -75,6 +86,16 @@ func (ss *xhttpSession) send(f *protocol.Frame) error {
 		ss.fl.Flush()
 	}
 	return nil
+}
+
+// closeWriter permanently stops writes to the download response and waits for
+// any in-flight write to finish. The download handler must call it before
+// returning, otherwise the target->download goroutine can still be inside
+// Encode/Flush when net/http recycles the ResponseWriter and panics.
+func (ss *xhttpSession) closeWriter() {
+	ss.sendMu.Lock()
+	ss.sendClosed = true
+	ss.sendMu.Unlock()
 }
 
 func (ss *xhttpSession) close() {
@@ -191,7 +212,11 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 	// Flush any proxy/CDN response buffer before real data can be tiny.
 	padding := make([]byte, xhttpPaddingBytes)
 	_ = ss.send(&protocol.Frame{Type: protocol.TypeNoop, Payload: padding})
+	// closeWriter first: it invalidates the ResponseWriter for every writer
+	// (including upload-side PONGs) and waits for a write that is already in
+	// flight, so nothing can touch w once this handler returns.
 	defer func() {
+		ss.closeWriter()
 		ss.close()
 		s.removeXHTTPSession(id)
 		s.finishStream(ss.stat, ss.bytesIn.Load(), ss.bytesOut.Load())
@@ -200,7 +225,9 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// target -> download
+	pumpDone := make(chan struct{})
 	go func() {
+		defer close(pumpDone)
 		buf := make([]byte, protocol.MaxPayload)
 		for {
 			n, rerr := ss.conn.Read(buf)
@@ -223,6 +250,12 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 	case <-ss.done:
 	case <-r.Context().Done():
 	}
+	// Tear down in this order: stop the pump from writing to w, unblock its
+	// conn.Read, then wait for it to exit. Waiting is what keeps the pump from
+	// touching the ResponseWriter after this handler has finished.
+	ss.closeWriter()
+	ss.close()
+	<-pumpDone
 }
 
 // handleXHTTPUpload consumes one short upload POST: frames are parsed and
