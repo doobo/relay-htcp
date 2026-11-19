@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -510,6 +511,24 @@ func (a *Server) storeConfig(canon string) error {
 		if err := os.WriteFile(a.opts.ConfigPath, []byte(canon), 0o600); err != nil {
 			a.log.Warn("config file write-back failed", "path", a.opts.ConfigPath, "err", err)
 		}
+	}
+	return nil
+}
+
+// PersistConfig stores the live configuration in the database without touching
+// the YAML file. SIGHUP reloads use it: the file keeps whatever formatting and
+// comments the operator wrote, while the database (which wins at the next
+// start) matches the running config.
+func (a *Server) PersistConfig() error {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	canon := a.provider.CurrentConfigYAML()
+	if canon == "" {
+		return fmt.Errorf("provider returned an empty config")
+	}
+	if err := a.store.SetSetting(ConfigKey, canon); err != nil {
+		a.log.Error("reloaded config applied in memory but not persisted", "err", err)
+		return err
 	}
 	return nil
 }

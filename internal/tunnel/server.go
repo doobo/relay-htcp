@@ -122,6 +122,9 @@ type Server struct {
 
 	mu  sync.Mutex
 	srv *http.Server
+	// certs is the live TLS key pair when the listener serves TLS. It reloads
+	// itself when the files change; ReloadTLS forces an immediate re-read.
+	certs *certReloader
 
 	// xhttp transport sessions, keyed by the client-generated session id.
 	xmu       sync.Mutex
@@ -597,18 +600,46 @@ func (s *Server) Close() error {
 	return s.srv.Close()
 }
 
-// buildTLSConfig loads the certificate.
+// buildTLSConfig loads the certificate and registers it with a reloader, so
+// replacing the cert/key files (or sending SIGHUP) takes effect on the next
+// handshake without dropping the listener.
 func (s *Server) buildTLSConfig() (*tls.Config, error) {
 	cfg := s.cfgGet()
-	cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
-	if err != nil {
+	loader := newCertReloader(cfg.TLS.Cert, cfg.TLS.Key, s.log)
+	if err := loader.load(); err != nil {
 		return nil, fmt.Errorf("load certificate: %w", err)
 	}
+	s.mu.Lock()
+	s.certs = loader
+	s.mu.Unlock()
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return loader.get()
+		},
+		MinVersion: tls.VersionTLS12,
 		// Go does not inject "h2" into a user-supplied TLSConfig, so set
 		// the ALPN protocols explicitly: h2 first, http/1.1 as fallback.
 		NextProtos: []string{"h2", "http/1.1"},
 	}, nil
+}
+
+// reloadCert re-reads the certificate and key for the live TLS listener. The
+// listener itself is untouched: the next handshake gets the new certificate.
+// Cleartext listeners have nothing to reload, and enabling or disabling TLS
+// still requires a process restart (ApplyConfig reports that separately).
+func (s *Server) reloadCert() error {
+	s.mu.Lock()
+	loader := s.certs
+	s.mu.Unlock()
+	if loader == nil {
+		return nil
+	}
+	cfg := s.cfgGet()
+	if !cfg.TLS.Enabled() {
+		return nil
+	}
+	if err := loader.configure(cfg.TLS.Cert, cfg.TLS.Key); err != nil {
+		return fmt.Errorf("reload certificate: %w", err)
+	}
+	return nil
 }

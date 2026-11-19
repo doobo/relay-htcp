@@ -13,12 +13,14 @@ import (
 
 // admin.Provider implementation for the tunnel server.
 //
-// Hot-applied: auth tokens, routes, dial/idle timeouts, max connections and
-// the disguise toggle. These are read per request, so swapping the atomic
-// config takes effect immediately.
+// Hot-applied (panel save and SIGHUP reload share ApplyConfig): auth tokens,
+// routes, proxy, dial/idle timeouts, max connections, the xhttp path, quota
+// refresh and the disguise toggle. These are read per request, so swapping the
+// atomic config takes effect immediately.
 //
-// Restart-required: listen address, TLS certificate, max concurrent streams
-// (baked into the http.Server) and the log level.
+// Restart-required: listen address, enabling/disabling TLS or changing the
+// certificate paths, max concurrent streams (baked into the http.Server) and
+// the log level. The certificate *content* is reloaded by certReloader.
 
 // Role implements admin.Provider.
 func (s *Server) Role() string { return "server" }
@@ -79,6 +81,18 @@ func (s *Server) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	if err != nil {
 		return admin.SaveReport{}, err
 	}
+	return s.ApplyConfig(newCfg)
+}
+
+// ApplyConfig hot-applies an already-parsed configuration. Settings are read
+// per request from the atomic copy, so a swap takes effect immediately without
+// touching the listener or the live streams. The admin panel and SIGHUP
+// reloads share this path; the report lists which fields changed and which
+// still need a process restart.
+func (s *Server) ApplyConfig(newCfg *config.ServerConfig) (admin.SaveReport, error) {
+	if err := newCfg.Validate(); err != nil {
+		return admin.SaveReport{}, err
+	}
 	old := s.cfgGet()
 	// The admin section is file-managed runtime configuration, not part of
 	// the editable tunnel config: keep the running value so panel saves
@@ -89,7 +103,9 @@ func (s *Server) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	if old.Listen != newCfg.Listen {
 		report.RestartRequired = append(report.RestartRequired, "listen")
 	}
-	if old.TLS != newCfg.TLS {
+	// Certificate paths and contents are reloaded in place below; only
+	// enabling or disabling TLS needs the listener to be rebuilt.
+	if old.TLS.Enabled() != newCfg.TLS.Enabled() {
 		report.RestartRequired = append(report.RestartRequired, "tls")
 	}
 	if old.Tunnel.MaxConcurrentStreams != newCfg.Tunnel.MaxConcurrentStreams {
@@ -129,6 +145,14 @@ func (s *Server) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	// Token limits may have changed: recompute the cached blocked set now
 	// instead of waiting for the next background tick.
 	s.refreshTokenLimits()
+	// Pick up a rotated certificate (or a new path) for the live listener.
+	// This runs for panel saves and SIGHUP reloads alike; failures keep the
+	// certificate that is currently being served.
+	if newCfg.TLS.Enabled() {
+		if err := s.reloadCert(); err != nil {
+			s.log.Warn("tls certificate reload failed, keeping the loaded one", "err", err)
+		}
+	}
 	return report, nil
 }
 
@@ -149,7 +173,7 @@ func (s *Server) ConfigFormSchema() admin.FormSchema {
 			Title: "监听与 TLS",
 			Fields: []admin.FormField{
 				{Path: "listen", Label: "隧道监听地址", Type: admin.FormText, Placeholder: ":8443", Help: "修改后需要重启"},
-				{Path: "tls.cert", Label: "证书文件", Type: admin.FormText, Placeholder: "server.crt", Help: "与私钥同时留空时使用明文 h2c；修改后需要重启"},
+				{Path: "tls.cert", Label: "证书文件", Type: admin.FormText, Placeholder: "server.crt", Help: "与私钥同时留空时使用明文 h2c；启用/关闭 TLS 需要重启，证书路径与内容都会热加载"},
 				{Path: "tls.key", Label: "私钥文件", Type: admin.FormText, Placeholder: "server.key"},
 				{Path: "log.level", Label: "日志级别", Type: admin.FormSelect, Options: []string{"debug", "info", "warn", "error"}, Help: "修改后需要重启"},
 			},

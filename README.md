@@ -26,7 +26,7 @@
 - **TLS**：支持真实证书、自签证书、自定义 CA；ALPN 优先协商 `h2`。
 - **明文 h2c**：无 TLS 时使用 HTTP/2 明文（h2c），适合内网和测试。
 - **伪装（可选）**：浏览器风格请求头、仿 nginx 的 `Server` 头、未知路径返回静态诱饵页。
-- **热更新**：通过管理面板修改配置，部分字段无需重启即可生效。
+- **热更新**：通过管理面板或服务端 `SIGHUP` 修改配置，可热应用的字段无需重启即可生效；TLS 证书换文件即生效。
 - **服务端出口代理**：支持全局 HTTP/SOCKS5 代理；内网路由可单独勾选“走代理”，未勾选的路由保持直连。
 - **端口共用与伪装**：服务端管理面板可挂到隧道端口下的自定义路径，外部只看到一个 Web 服务。
 - **加密登录与主题**：登录密码用 RSA-OAEP + AES-GCM（不支持 WebCrypto 时回退 TweetNaCl）加密；支持跟随系统/深色/浅色/纯黑主题。
@@ -605,12 +605,31 @@ KEK 来源（按优先级）：
 
 | 端 | 立即生效 | 需要重启 |
 |---|---|---|
-| 服务端 | `auth.tokens`、`routes`、`tunnel.dial_timeout`、`tunnel.idle_timeout`、`tunnel.max_connections`、`tunnel.xhttp_path`、`disguise.enabled` | `listen`、`tls`、`tunnel.max_concurrent_streams`、`log.level` |
+| 服务端 | `auth.tokens`、`routes`、`proxy.*`、`tunnel.dial_timeout`、`tunnel.idle_timeout`、`tunnel.max_connections`、`tunnel.xhttp_path`、`tunnel.quota_refresh`、`disguise.enabled` | `listen`、`tunnel.max_concurrent_streams`、`log.level`、启用/关闭 TLS |
+| 服务端 TLS | 证书/私钥内容与路径（保存配置或 SIGHUP 后，下一次握手生效） | 启用/关闭 TLS（明文 h2c ↔ TLS） |
 | 客户端 | `listeners`（新增/删除/改目标/改服务端选择） | `servers`、`auth.token`、`tls`、`proxy`、`tunnel.*`、`log.level` |
 
 客户端删除或改目标监听器时，已建立的连接会继续跑到结束，不会被强行中断。
 
 需要重启的字段保存后不会立即生效，可在客户端面板右上角点击“重启”：进程会原地重载配置、重建连接池并重新绑定监听，期间连接短暂中断，面板会话和已保存的配置保留。脚本也可以直接调用 `POST /api/restart`。
+
+#### 服务端 SIGHUP 重载
+
+服务端支持类似 `nginx -s reload` 的重载：修改 `-config` 指定的 YAML 后发送 `SIGHUP`，进程会重新读取文件并热应用，**不重启进程、不重绑监听、不断开已有隧道流**。
+
+```bash
+kill -HUP <pid>
+# 或：systemctl reload relay-htcp    （ExecReload=/bin/kill -HUP $MAINPID）
+```
+
+行为细节：
+
+- 只应用可热更新的字段（上表第一列），需要重启的字段会在日志里以 `restart_required` 明确列出，不会被静默忽略。
+- 文件不存在、YAML 语法错误或校验失败时**保留当前运行配置**并记录 error，进程继续服务。
+- 重载成功后同步写入管理数据库（启动时数据库优先于文件），磁盘上的 YAML 保持原样，不会被重排或丢掉注释。
+- TLS 证书会在保存配置或 SIGHUP 时强制重新读取；即使不发信号，替换证书文件后也会在下一次握手前（最多 1 分钟后，按文件 mtime 检查）自动生效。替换成半写坏的证书时保留旧证书继续服务，只记录 warning。
+- 没有配置文件（内置默认配置启动）时 SIGHUP 只打印一条 warning，不做任何变更。
+- 客户端侧没有 SIGHUP 语义，仍是面板“重启”。
 
 ### 管理 API
 
@@ -818,7 +837,7 @@ Task.md                最初的设计与实施方案
 
 - 仅支持 TCP，不支持 UDP。
 - 需要在客户端显式配置本地监听端口，不提供 TUN/透明代理模式。
-- 不自动申请或热加载 TLS 证书；证书变更需重启。
+- 不自动申请 TLS 证书（ACME）；证书内容可热加载，但更换路径或启用/关闭 TLS 需重启。
 - 管理面板独立监听时不提供 TLS；共用模式复用隧道端口的 TLS（h2c 时仍为明文），请配合 IP 白名单使用。
 - 暂无内置的密码重置命令、Prometheus 指标、带宽/配额限制。
 - 当前功能验证以单元测试和端到端测试为主，尚未包含大规模长稳压测。

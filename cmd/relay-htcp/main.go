@@ -201,9 +201,12 @@ func runServer(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var asrv *admin.Server
+	stopAdmin := func() {}
 	if cfg.Admin.Enabled {
-		asrv, stopAdmin := openAdmin(cfg.Admin, srv, usedConfig, log, nil)
-		defer stopAdmin()
+		var closeAdmin func()
+		asrv, closeAdmin = openAdmin(cfg.Admin, srv, usedConfig, log, nil)
+		stopAdmin = closeAdmin
 		asrv.Traffic().Start(ctx)
 		srv.SetTraffic(asrv.Traffic())
 		if cfg.Admin.Shared {
@@ -219,6 +222,14 @@ func runServer(args []string) {
 			serveAdminStandalone(ctx, asrv, cfg.Admin, log)
 		}
 	}
+	defer stopAdmin()
+
+	// SIGHUP reloads the config file in place (like `nginx -s reload` for the
+	// hot-appliable fields) without rebinding the listener or dropping streams.
+	watchReloadSignal(ctx, log, func() {
+		reloadServerConfig(srv, asrv, usedConfig, log)
+	})
+
 	if err := srv.Serve(ctx); err != nil {
 		fatal(err)
 	}
