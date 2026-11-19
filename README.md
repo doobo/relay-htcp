@@ -300,15 +300,26 @@ listeners:
 relay-htcp 的 xhttp 前缀默认是 **`/relay`**，因此同一域名下的 Xray 可以继续占用 `/xhttp`，互不冲突。只要确保 Nginx 把 `/relay/` 转发到 relay-htcp 的监听端口：
 
 ```nginx
-location /relay/ {
-    proxy_pass http://127.0.0.1:5630;
+upstream relay_htcp {
+    server 127.0.0.1:5630;
+    keepalive 64;                       # 大量短上传 POST，需要复用连接
+}
+
+location ^~ /relay/ {
+    proxy_pass http://relay_htcp;        # 不要带尾斜杠，否则 /relay 前缀会被吃掉
     proxy_http_version 1.1;
+    proxy_set_header Connection "";      # 本项目不用 WebSocket
     proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;   # 覆盖，避免伪造 IP
     proxy_buffering off;
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
+    proxy_request_buffering off;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
 }
 ```
+
+完整配置（TLS 终结、超时取舍、面板白名单、四层透传方案、常见坑）见[《反向代理注意事项》](#反向代理注意事项)。
 
 如果还需要换前缀，服务端和客户端必须一起改：
 
@@ -822,16 +833,141 @@ Task.md                最初的设计与实施方案
 | `target unavailable`（502） | 服务端无法连接内网目标 | 检查目标地址、端口和服务状态 |
 | `no live tunnel available` | 客户端未建立控制流 | 检查网络、TLS、Token 和服务端日志 |
 | `x509: certificate signed by unknown authority` | 自签证书未被信任 | 配置 `tls.ca_file`，或测试时临时 `insecure_skip_verify: true` |
-| `HTTP/2 required for tunnel streams` | 链路没有协商到 HTTP/2，或 HTTP/1.1 不支持全双工 | 使用 HTTPS 并确保端到端 h2；代理需支持流式双向转发 |
+| `HTTP/2 required for tunnel streams` | 链路没有协商到 HTTP/2，或 HTTP/1.1 不支持全双工 | 使用 HTTPS 并确保端到端 h2；经过七层代理时改用 `transport: xhttp`（见[反向代理注意事项](#反向代理注意事项)） |
 | 隧道频繁重连 | 网络抖动或心跳超时 | 适当增大 `heartbeat`/`heartbeat_miss`，检查 NAT 空闲超时 |
 | 面板密码遗忘 | 首次密码只打印一次，且不会覆盖已有账号 | 备份后删除数据库重新初始化，或用 SQLite 工具更新 `admin_users.password_hash`；注意删除数据库会丢失面板中保存的配置和用户 |
 | 启动报 `unwrap data key (wrong master key or corrupted database?)` | 密钥文件被替换或丢失，或 `RELAY_HTCP_MASTER_KEY` 与建库时不一致 | 恢复原来的密钥文件/环境变量；不要删除数据库 |
 
 ### 反向代理注意事项
 
-- 推荐使用 **TCP 四层转发**，让 TLS 和 HTTP/2 端到端保持原样。
-- 如果使用 Nginx 等七层代理，必须关闭请求/响应缓冲，保证双向流式转发；如果代理只能以 HTTP/1.1 与上游通信，还需确认其支持全双工流式转发，否则长连接数据流可能被缓冲或卡住。
-- 不要让代理改写 `Authorization`、`X-Tunnel-Target`、`X-Tunnel-Protocol` 等头部。
+代理怎么配取决于客户端 `servers[].transport`，两者必须匹配：
+
+| 客户端 `transport` | 链路要求 | 可用的代理 |
+|---|---|---|
+| `http`（默认） | 端到端 HTTP/2 **全双工**：`POST /tunnel`、`POST /stream` 需要边读请求体边写响应体 | 只有 **TCP 四层透传**（或直连） |
+| `xhttp` | 普通 HTTP/1.1 请求/响应：短 `POST /relay/upload` + 长 `GET /relay/download` | 四层、Nginx 七层、Cloudflare 等 CDN 均可 |
+
+Nginx 不能把 HTTP/2 转给上游（`grpc_pass` 只适用于 gRPC），HTTP/1.1 上游也不保证全双工，所以**走七层代理时必须用 `xhttp`**；想保留默认的 `http` 传输，就只能用 `stream` 四层转发。
+
+#### 方案 A：Nginx 七层 + xhttp（公网推荐）
+
+```nginx
+upstream relay_htcp {
+    server 127.0.0.1:5630;
+    keepalive 64;                 # xhttp 上传是大量短 POST，复用连接很关键
+}
+
+server {
+    listen 443 ssl;
+    http2 on;                     # nginx >= 1.25.1；老版本写 listen 443 ssl http2;
+    server_name relay.example.com;
+
+    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+
+    client_max_body_size 8m;      # 服务端单次上传上限 4 MiB，不必设成 512m
+
+    location ^~ / {               # 不带尾斜杠，原样透传 /relay /health /admin
+        proxy_pass http://relay_htcp;
+        proxy_http_version 1.1;
+
+        # 本项目不使用 WebSocket：清空 Connection 才能启用上游 keep-alive
+        proxy_set_header Connection "";
+        proxy_set_header Upgrade "";
+
+        # 单跳代理：覆盖而不是追加，否则客户端自带的 XFF 可以伪造面板白名单
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 下载 GET 是长流式响应：必须关缓冲
+        # （服务端也返回了 X-Accel-Buffering: no，这里显式关闭可覆盖不认该头的中转）
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_max_temp_file_size 0;
+
+        # 上传随到随转，不等整个 body
+        proxy_request_buffering off;
+
+        # 客户端每 tunnel.heartbeat（默认 15s）发 PING，服务端在下载流回 PONG；
+        # 读超时保持 > 3×heartbeat 即可，不必开到一小时
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    300s;
+        proxy_read_timeout    300s;
+        send_timeout          300s;
+
+        proxy_socket_keepalive on;
+    }
+}
+```
+
+客户端对应配置：
+
+```yaml
+servers:
+  - name: nginx
+    url: "https://relay.example.com"
+    token: "与服务端一致的 Token"
+    transport: xhttp
+    xhttp_path: "/relay"      # 必须与服务端 tunnel.xhttp_path 一致
+
+listeners:
+  - local: "127.0.0.1:2222"
+    target: "ssh"
+    servers: [nginx]
+    strategy: failover
+```
+
+关键点：
+
+| 配置 | 原因 |
+|---|---|
+| `upstream` + `keepalive 64` + `proxy_set_header Connection ""` | 每个 xhttp 上传都是独立短 POST；`Connection: Upgrade`（WebSocket 写法）会让上游 keep-alive 失效 |
+| `proxy_buffering off` / `proxy_cache off` | `/relay/download` 是长流式响应，缓冲会让数据攒在 nginx 里、延迟飙升甚至超时 |
+| `proxy_request_buffering off` | 上传边到边转，避免先落盘再转发 |
+| `proxy_read_timeout 300s` | 空闲时靠 PING/PONG 保活；超时时间要大于 `3 × tunnel.heartbeat` |
+| `client_max_body_size 8m` | 服务端 `maxXHTTPUploadBody` 限制单次上传 4 MiB，太大的值只会让代理白收数据 |
+| `X-Forwarded-For $remote_addr`（覆盖） | 面板取 XFF 的第一段；用 `$proxy_add_x_forwarded_for` 追加会保留客户端伪造值，可绕过 `admin.allowed_cidrs` |
+| `location ^~ /` 且 `proxy_pass` 不带尾斜杠 | `proxy_pass http://x/;` 会吃掉路径前缀，导致 `/relay/*` 404 |
+
+其他：
+
+- 只想对外暴露隧道时，把 location 收窄成 `location ^~ /relay/ { ... }`，`/admin`、`/health` 就不经过公网；若保留 `^~ /`，建议在 nginx 里对面板路径加 `allow/deny` 或依赖面板自身的 IP 白名单。
+- 不要改写 `Authorization`、`X-Tunnel-Target`、`X-Tunnel-Protocol` 等头部，也不要对 `/relay/*` 开启 gzip 或内容改写——帧是二进制流，必须原样透传。
+- 面板的 IP 白名单只在直连对端是回环/链路本地时信任 `CF-Connecting-IP`、`X-Forwarded-For`、`X-Real-IP`，所以本机 nginx 反代可以正常识别真实客户端；再往上一层是 Cloudflare 时优先用 `CF-Connecting-IP`。
+- 前面还有 CDN（Cloudflare 等）时，CDN 会掐空闲连接，保持默认 15s 心跳即可，但不要把 `proxy_read_timeout` 设到 60s 以下。
+
+验证：
+
+```bash
+nginx -t && nginx -s reload
+curl -s https://relay.example.com/health     # {"status":"ok","connections":N,...}
+```
+
+客户端日志应出现 `tunnel established server=nginx ...`，服务端 `/health` 的 `connections` 会随 `tunnel.connections` 增长。
+
+#### 方案 B：四层透传（保留 `http` 传输）
+
+```nginx
+stream {
+    upstream relay_htcp { server 127.0.0.1:5630; }
+    server {
+        listen 8443;
+        proxy_pass relay_htcp;
+        proxy_timeout 1h;             # 隧道是长连接
+        proxy_socket_keepalive on;
+    }
+}
+```
+
+此时 TLS 由 relay-htcp 自己终结（服务端配置 `tls.cert`/`tls.key`），客户端写 `url: "https://relay.example.com:8443"`、`transport: http`；自签证书用 `tls.ca_file` 或临时 `insecure_skip_verify: true`。这种形态下证书热加载和 `SIGHUP` 重载仍然有效（TLS 不经过代理终结）。
+
+#### 不支持的组合
+
+- `http` 传输 + Nginx `proxy_pass` 七层：请求体会被缓冲或整包转发，隧道会卡死或超时，日志常见 `HTTP/2 required for tunnel streams` 或 5 分钟后断开。
+- 让七层代理压缩、改写或缓存 `/relay/*` 的响应：帧是二进制流，任何改写都会破坏协议。
+
 
 ## 已知限制与后续方向
 
