@@ -28,6 +28,7 @@ type ServerConfig struct {
 
 	routeTable map[string]string // name -> target, built by Validate
 	routeProxy map[string]bool   // name -> use_proxy, built by Validate
+	routeType  map[string]string // name -> tcp|stcp, built by Validate
 }
 
 // TLSConfig configures the TLS listener. When Cert and Key are empty the
@@ -65,14 +66,29 @@ type AuthConfig struct {
 	Tokens []Token `yaml:"tokens"`
 }
 
-// Route maps a logical name to a local target address.
+// Route maps a logical name to a local target address, or marks it as an
+// stcp route whose two client sides are paired by the server.
 type Route struct {
-	Name   string `yaml:"name"`
-	Target string `yaml:"target"`
+	Name string `yaml:"name"`
+	// Type is RouteTypeTCP (default) or RouteTypeSTCP. A tcp route makes the
+	// server dial Target; an stcp route has no target at all and instead
+	// pairs a provider stream with a visitor stream.
+	Type   string `yaml:"type,omitempty"`
+	Target string `yaml:"target,omitempty"`
 	// UseProxy sends this route's dials through the server-wide proxy when
-	// one is enabled. Other routes keep dialing directly.
+	// one is enabled. Other routes keep dialing directly. Only meaningful
+	// for tcp routes.
 	UseProxy bool `yaml:"use_proxy,omitempty"`
 }
+
+// Route types.
+const (
+	// RouteTypeTCP is the classic behaviour: the server dials Target.
+	RouteTypeTCP = "tcp"
+	// RouteTypeSTCP pairs a provider client (whose local service is exposed)
+	// with a visitor client through the server. No target is dialed.
+	RouteTypeSTCP = "stcp"
+)
 
 // TunnelServer tunes server-side tunnel behaviour.
 type TunnelServer struct {
@@ -87,6 +103,9 @@ type TunnelServer struct {
 	// QuotaRefresh is how often token traffic limits are re-evaluated.
 	// Defaults to 5m.
 	QuotaRefresh time.Duration `yaml:"quota_refresh"`
+	// STCPTimeout bounds how long a pending stcp stream waits for its peer
+	// (a provider waits for a visitor and vice versa). Defaults to 30s.
+	STCPTimeout time.Duration `yaml:"stcp_timeout"`
 }
 
 // DisguiseConfig toggles camouflage behaviour. Enabled defaults to true.
@@ -150,21 +169,43 @@ func (c *ServerConfig) Validate() error {
 	}
 	c.routeTable = make(map[string]string, len(c.Routes))
 	c.routeProxy = make(map[string]bool, len(c.Routes))
+	c.routeType = make(map[string]string, len(c.Routes))
 	seenRoutes := map[string]bool{}
-	for _, r := range c.Routes {
-		if r.Name == "" || r.Target == "" {
-			return fmt.Errorf("routes: name and target are required")
+	for i := range c.Routes {
+		r := &c.Routes[i]
+		if r.Name == "" {
+			return fmt.Errorf("routes: name is required")
 		}
 		if seenRoutes[r.Name] {
 			return fmt.Errorf("routes: duplicate name %q", r.Name)
 		}
 		seenRoutes[r.Name] = true
+		rt := strings.ToLower(strings.TrimSpace(r.Type))
+		switch rt {
+		case "":
+			rt = RouteTypeTCP
+		case RouteTypeTCP, RouteTypeSTCP:
+		default:
+			return fmt.Errorf("routes: type for %q must be %s or %s, got %q",
+				r.Name, RouteTypeTCP, RouteTypeSTCP, r.Type)
+		}
+		r.Type = rt
+		c.routeType[r.Name] = rt
+		c.routeProxy[r.Name] = r.UseProxy
+		if rt == RouteTypeSTCP {
+			if strings.TrimSpace(r.Target) != "" {
+				return fmt.Errorf("routes: target must be empty for stcp route %q", r.Name)
+			}
+			continue
+		}
+		if r.Target == "" {
+			return fmt.Errorf("routes: target is required for tcp route %q", r.Name)
+		}
 		addr, err := TargetAddress(r.Target)
 		if err != nil {
 			return fmt.Errorf("routes: target for %q: %w", r.Name, err)
 		}
 		c.routeTable[r.Name] = addr
-		c.routeProxy[r.Name] = r.UseProxy
 	}
 	if err := c.Proxy.Normalize(); err != nil {
 		return fmt.Errorf("proxy: %w", err)
@@ -188,6 +229,9 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.Tunnel.QuotaRefresh <= 0 {
 		c.Tunnel.QuotaRefresh = 5 * time.Minute
+	}
+	if c.Tunnel.STCPTimeout <= 0 {
+		c.Tunnel.STCPTimeout = 30 * time.Second
 	}
 	xhttpPath, err := NormalizeXHTTPPath(c.Tunnel.XHTTPPath)
 	if err != nil {
@@ -274,10 +318,24 @@ func NormalizeXHTTPPath(p string) (string, error) {
 }
 
 // RouteTarget returns the local target for a route name. URL targets are
-// normalized to a dialable host:port (https -> 443, http -> 80).
+// normalized to a dialable host:port (https -> 443, http -> 80). stcp routes
+// have no target and report ok=false; use RouteKind to distinguish them from
+// unknown names.
 func (c *ServerConfig) RouteTarget(name string) (string, bool) {
 	t, ok := c.routeTable[name]
 	return t, ok
+}
+
+// RouteKind returns the route type (RouteTypeTCP or RouteTypeSTCP). ok is
+// false when the route is not configured.
+func (c *ServerConfig) RouteKind(name string) (string, bool) {
+	t, ok := c.routeType[name]
+	return t, ok
+}
+
+// RouteIsSTCP reports whether name is a configured stcp route.
+func (c *ServerConfig) RouteIsSTCP(name string) bool {
+	return c.routeType[name] == RouteTypeSTCP
 }
 
 // TargetAddress turns a route target into a dialable host:port. Besides the

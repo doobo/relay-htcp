@@ -45,10 +45,13 @@ type ClientConfig struct {
 	Servers   []ServerEndpoint `yaml:"servers"`
 	Proxy     ClientProxy      `yaml:"proxy"`
 	Listeners []Listener       `yaml:"listeners"`
-	Tunnel    TunnelClient     `yaml:"tunnel"`
-	Disguise  ClientDisguise   `yaml:"disguise"`
-	Log       LogConfig        `yaml:"log"`
-	Admin     AdminConfig      `yaml:"admin"`
+	// Providers expose local TCP services on stcp routes: the server pairs a
+	// visitor on the same route with one of these provider streams.
+	Providers []Provider     `yaml:"providers"`
+	Tunnel    TunnelClient   `yaml:"tunnel"`
+	Disguise  ClientDisguise `yaml:"disguise"`
+	Log       LogConfig      `yaml:"log"`
+	Admin     AdminConfig    `yaml:"admin"`
 }
 
 // ClientTLS tunes the client's TLS behaviour. It is the default for every
@@ -176,6 +179,24 @@ type Listener struct {
 	Strategy string `yaml:"strategy"`
 }
 
+// Provider exposes one local TCP service on an stcp route. The client keeps
+// Pool idle provider streams per selected server, so up to Pool visitors can
+// use the route concurrently (one stream is consumed per visitor).
+type Provider struct {
+	// Route is the server-side route name (it must be type: stcp there).
+	Route string `yaml:"route"`
+	// Local is the TCP service this client exposes, e.g. 127.0.0.1:8080.
+	Local string `yaml:"local"`
+	// Servers selects which configured servers carry the provider streams.
+	// Empty means all servers.
+	Servers []string `yaml:"servers"`
+	// Pool is how many provider streams to keep per server. Defaults to 2.
+	Pool int `yaml:"pool"`
+}
+
+// Key identifies a provider entry for hot-apply reconciliation.
+func (p Provider) Key() string { return p.Route + "\x00" + p.Local }
+
 // TunnelClient tunes the client tunnel pool.
 type TunnelClient struct {
 	Connections   int           `yaml:"connections"`
@@ -263,8 +284,8 @@ func (c *ClientConfig) Validate() error {
 		}
 		s.XHTTPPath = xhttpPath
 	}
-	if len(c.Listeners) == 0 && !c.Admin.Enabled {
-		return fmt.Errorf("listeners: at least one required")
+	if len(c.Listeners) == 0 && len(c.Providers) == 0 && !c.Admin.Enabled {
+		return fmt.Errorf("listeners or providers: at least one required")
 	}
 	if err := c.Proxy.Normalize(); err != nil {
 		return fmt.Errorf("proxy: %w", err)
@@ -295,6 +316,38 @@ func (c *ClientConfig) Validate() error {
 			}
 			if selected[name] {
 				return fmt.Errorf("listeners[%d].servers: duplicate server %q", i, name)
+			}
+			selected[name] = true
+		}
+	}
+	seenProviders := map[string]bool{}
+	for i := range c.Providers {
+		p := &c.Providers[i]
+		p.Route = strings.TrimSpace(p.Route)
+		if p.Route == "" || p.Local == "" {
+			return fmt.Errorf("providers[%d]: route and local are required", i)
+		}
+		if _, _, err := net.SplitHostPort(p.Local); err != nil {
+			return fmt.Errorf("providers[%d].local: must be host:port, got %q", i, p.Local)
+		}
+		if p.Pool <= 0 {
+			p.Pool = 2
+		}
+		if p.Pool > 128 {
+			return fmt.Errorf("providers[%d].pool: must be at most 128, got %d", i, p.Pool)
+		}
+		key := p.Key()
+		if seenProviders[key] {
+			return fmt.Errorf("providers: duplicate route/local %q/%q", p.Route, p.Local)
+		}
+		seenProviders[key] = true
+		selected := map[string]bool{}
+		for _, name := range p.Servers {
+			if !serverNames[name] {
+				return fmt.Errorf("providers[%d].servers: unknown server %q", i, name)
+			}
+			if selected[name] {
+				return fmt.Errorf("providers[%d].servers: duplicate server %q", i, name)
 			}
 			selected[name] = true
 		}

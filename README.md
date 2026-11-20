@@ -22,6 +22,7 @@
 - **CDN / Cloudflare 适配**：每个服务端可选 `transport: xhttp`，把双向流拆成“短上传 POST + 长下载 GET”，不依赖双向 HTTP/2 请求体，可穿过 Cloudflare 等七层代理；默认的 `http` 传输仍保留给直连或四层转发场景。
 - **出口代理**：客户端可用 HTTP 或 SOCKS5 代理连接服务端（含 xhttp），默认关闭；适合本机需要经代理访问外网的场景。
 - **认证与路由**：Bearer Token 认证；每个 Token 可绑定一个或多个路由（建议按最小权限分配）；路由名到内网地址的映射在服务端集中管理。
+- **STCP 双端配对**：路由可声明 `type: stcp`，服务端不拨号，而是把“提供端”（暴露本机服务）与“访问端”（本地监听）两条客户端流按路由名配对；两端复用现有 Token 与路由白名单，适合两端都在 NAT 后、又不希望在服务端暴露端口的场景。
 - **心跳与自愈**：PING/PONG 保活，连续丢失 `heartbeat_miss` 次后自动重连；指数退避。
 - **TLS**：支持真实证书、自签证书、自定义 CA；ALPN 优先协商 `h2`。
 - **明文 h2c**：无 TLS 时使用 HTTP/2 明文（h2c），适合内网和测试。
@@ -46,6 +47,8 @@
 4. 服务端校验 Token 与路由权限后，拨号到该路由对应的内网目标地址。
 5. 双方把 HTTP 请求体/响应体当作字节流，用自定义帧协议双向转发 TCP 数据。
 
+`type: stcp` 的路由不执行第 4 步的拨号：服务端把同一路由上的提供端流（`X-Tunnel-Role: provider`）与访问端流配对，再把两条流的帧互相转发；配对成功后先给提供端发一个 `START` 帧，提供端收到后才拨号自己的本地服务。
+
 ### 帧格式
 
 所有隧道流量（控制流和数据流）都使用同一种二进制帧：
@@ -63,6 +66,8 @@
 | `PING` | `0x1` | 心跳请求（客户端 → 服务端） |
 | `PONG` | `0x2` | 心跳响应，payload 回显 PING |
 | `CLOSE` | `0x3` | 优雅关闭，payload 可携带原因 |
+| `NOOP` | `0x4` | 填充帧，接收方忽略；用于提前冲刷 CDN 响应缓冲 |
+| `START` | `0x5` | 仅 stcp：通知提供端已与访问端配对，可以拨号本地服务 |
 
 在 HTTP/1.1 回退场景下，每条数据流会各自占用一条 TCP 连接（无法多路复用）；生产环境建议确保端到端 HTTP/2。
 
@@ -378,6 +383,57 @@ proxy:
 - 代理配置属于启动参数，面板保存后需要重启客户端；面板的“代理”页签可编辑，密码以掩码显示。
 - 该代理只影响客户端到服务端的连接，不影响本地监听端口和管理面板。
 
+### 10. STCP（双端配对，参考 frp stcp）
+
+普通路由由服务端主动拨号内网目标；stcp 路由则让两个客户端通过服务端“碰头”：
+
+- **提供端（provider）**：把本机服务挂到路由上，例如 `127.0.0.1:8080`；
+- **访问端（visitor）**：和普通监听一样，本地端口 → 路由名；
+- 服务端只按路由名配对两条流，**不拨号任何目标**，因此提供端和访问端都可以在 NAT 后面。
+
+两端都复用现有的 `auth.tokens` 和 `routes` 白名单：provider 和 visitor 使用的 Token 都必须授权了该路由。
+
+服务端：
+
+```yaml
+routes:
+  - name: h2
+    type: stcp          # 不写 type = tcp（默认，服务端拨号 target）
+  - name: mysql
+    target: "192.168.10.242:3306"
+```
+
+提供端客户端（暴露服务）：
+
+```yaml
+servers:
+  - name: primary
+    url: "https://tunnel.example.com:443"
+
+providers:
+  - route: h2
+    local: "127.0.0.1:8080"
+    servers: [primary]     # 留空 = 所有服务端
+    pool: 2                # 每个服务端预开 2 条提供流，即最多 2 个并发会话
+```
+
+访问端客户端（本地监听）：
+
+```yaml
+listeners:
+  - local: "127.0.0.1:5386"
+    target: h2
+    servers: [primary]
+```
+
+说明：
+
+- 提供端会持续维持 `pool` 条空闲流；服务端超过 `tunnel.stcp_timeout`（默认 30s）没有配对就结束空闲流，客户端立即重开。
+- 访问端没有可用提供端时会等待到同一个超时，然后返回 `503 no stcp provider available`，本地连接被重置。
+- `pool` 同时也是该路由在单个服务端上的并发会话上限；需要更多并发就调大它。
+- 提供端收到 `START` 帧后才拨号 `providers[].local`，空闲流不会占用本地服务的连接。
+- `http` 和 `xhttp` 两种传输都支持 stcp；xhttp 下每条提供流同样是一条长下载 GET + 短上传 POST。
+
 ## 配置参考
 
 配置采用 YAML，启动时校验；未知字段会被忽略，必填项缺失会直接报错退出。`log.level` 省略时默认 `info`，只接受 `debug` / `info` / `warn` / `error`。每个客户端 Token 可以绑定一个或多个路由，建议按最小权限分配。
@@ -402,7 +458,8 @@ proxy:
 | `auth.tokens[].monthly_limit_mb` | int | `0` | 每月流量上限（MB），`0` 表示不限制 |
 | `routes` | list | 必填 | 至少一个路由，名称不能重复 |
 | `routes[].name` | string | 必填 | 逻辑路由名，客户端通过 `X-Tunnel-Target` 引用 |
-| `routes[].target` | string | 必填 | TCP 目标，支持 `host:port` 或 `http(s)://host[:port]`（URL 仅取主机和端口，https 默认 443、http 默认 80） |
+| `routes[].type` | string | `tcp` | `tcp` = 服务端拨号 `target`；`stcp` = 不拨号，配对提供端与访问端，此时 `target` 必须留空 |
+| `routes[].target` | string | tcp 必填 | TCP 目标，支持 `host:port` 或 `http(s)://host[:port]`（URL 仅取主机和端口，https 默认 443、http 默认 80） |
 | `routes[].use_proxy` | bool | `false` | 该路由是否走服务端全局出口代理；未勾选的路由直连目标 |
 | `proxy.enabled` | bool | `false` | 启用服务端出口代理，只影响 `routes[].use_proxy` 为 `true` 的路由 |
 | `proxy.type` | string | `http` | `http`（CONNECT）或 `socks5` |
@@ -415,6 +472,7 @@ proxy:
 | `tunnel.idle_timeout` | duration | `90s` | 控制流静默多久后断开 |
 | `tunnel.xhttp_path` | string | `/relay` | xhttp 传输的端点前缀，默认 `/relay` |
 | `tunnel.quota_refresh` | duration | `5m` | 重新统计 Token 流量并刷新限制开关的间隔 |
+| `tunnel.stcp_timeout` | duration | `30s` | stcp 提供端/访问端等待配对的最长时间 |
 | `disguise.enabled` | bool | `true` | 是否启用诱饵页和伪装响应头 |
 | `log.level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `admin.*` | object | 见下文 | 管理面板配置 |
@@ -445,6 +503,11 @@ proxy:
 | `listeners[].target` | string | 必填 | 服务端路由名 |
 | `listeners[].servers` | list | 空 | 选择哪些服务端（按名称）；留空 = 全部 |
 | `listeners[].strategy` | string | `round_robin` | `round_robin` 轮询 / `failover` 优先第一个，服务端不可用或数据流打不开时才用下一个 |
+| `providers` | list | 空 | stcp 提供端列表；把本机服务暴露到服务端 `type: stcp` 的路由 |
+| `providers[].route` | string | 必填 | 服务端路由名（必须是 stcp 类型） |
+| `providers[].local` | string | 必填 | 本机被暴露的 TCP 服务地址，如 `127.0.0.1:8080` |
+| `providers[].servers` | list | 空 | 在哪些服务端上维持提供流；留空 = 全部 |
+| `providers[].pool` | int | `2` | 每个服务端的空闲/并发提供流数量，最大 128 |
 | `tunnel.connections` | int | `2` | 每个服务端的连接池大小，即该服务端的独立 HTTP/2 连接数；需重启生效 |
 | `tunnel.heartbeat` | duration | `15s` | PING 发送间隔 |
 | `tunnel.heartbeat_miss` | int | `3` | 连续丢失多少次 PONG 后判定隧道断开 |
@@ -616,9 +679,9 @@ KEK 来源（按优先级）：
 
 | 端 | 立即生效 | 需要重启 |
 |---|---|---|
-| 服务端 | `auth.tokens`、`routes`、`proxy.*`、`tunnel.dial_timeout`、`tunnel.idle_timeout`、`tunnel.max_connections`、`tunnel.xhttp_path`、`tunnel.quota_refresh`、`disguise.enabled` | `listen`、`tunnel.max_concurrent_streams`、`log.level`、启用/关闭 TLS |
+| 服务端 | `auth.tokens`、`routes`（含 `type`）、`proxy.*`、`tunnel.dial_timeout`、`tunnel.idle_timeout`、`tunnel.max_connections`、`tunnel.xhttp_path`、`tunnel.quota_refresh`、`tunnel.stcp_timeout`、`disguise.enabled` | `listen`、`tunnel.max_concurrent_streams`、`log.level`、启用/关闭 TLS |
 | 服务端 TLS | 证书/私钥内容与路径（保存配置或 SIGHUP 后，下一次握手生效） | 启用/关闭 TLS（明文 h2c ↔ TLS） |
-| 客户端 | `listeners`（新增/删除/改目标/改服务端选择） | `servers`、`auth.token`、`tls`、`proxy`、`tunnel.*`、`log.level` |
+| 客户端 | `listeners`（新增/删除/改目标/改服务端选择）、`providers`（新增/删除/改路由、地址、服务端或并发数） | `servers`、`auth.token`、`tls`、`proxy`、`tunnel.*`、`log.level` |
 
 客户端删除或改目标监听器时，已建立的连接会继续跑到结束，不会被强行中断。
 
@@ -831,6 +894,8 @@ Task.md                最初的设计与实施方案
 | `route not permitted`（403） | 当前 Token 的 `routes` 不包含该路由 | 在客户端 Token 页为该 Token 勾选该路由，或调整 Token |
 | `unknown route`（404） | `listeners[].target` 与服务端 `routes[].name` 不一致 | 统一路由名 |
 | `target unavailable`（502） | 服务端无法连接内网目标 | 检查目标地址、端口和服务状态 |
+| `no stcp provider available`（503） | stcp 路由当前没有提供端在排队 | 检查提供端客户端是否在线、`providers[].route` 是否与服务端路由同名、Token 是否授权了该路由 |
+| `stcp provider stream failed` | 提供端无法拨号 `providers[].local`，或 Token/路由不匹配 | 查看客户端日志里的具体错误，确认本地服务地址可访问 |
 | `no live tunnel available` | 客户端未建立控制流 | 检查网络、TLS、Token 和服务端日志 |
 | `x509: certificate signed by unknown authority` | 自签证书未被信任 | 配置 `tls.ca_file`，或测试时临时 `insecure_skip_verify: true` |
 | `HTTP/2 required for tunnel streams` | 链路没有协商到 HTTP/2，或 HTTP/1.1 不支持全双工 | 使用 HTTPS 并确保端到端 h2；经过七层代理时改用 `transport: xhttp`（见[反向代理注意事项](#反向代理注意事项)） |

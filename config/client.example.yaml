@@ -50,6 +50,16 @@ listeners:
     servers: [primary]          # empty = all configured servers
     strategy: round_robin
 
+# stcp providers expose local services on a server route whose type is stcp.
+# Visitors use a normal listener pointing at the same route; both sides reuse
+# the token and route allowlist. pool = warm streams per server (= max
+# concurrent sessions). The local service is dialed only after pairing.
+# providers:
+#   - route: h2
+#     local: "127.0.0.1:8080"
+#     servers: [primary]
+#     pool: 2
+
 tunnel:
   connections: 2          # per server: independent tunnel connections
   heartbeat: 15s          # PING interval

@@ -36,6 +36,7 @@ func TestConfigFormSchemaMatchesYAML(t *testing.T) {
 		Server:    "http://127.0.0.1:1",
 		Auth:      config.ClientAuth{Token: "token"},
 		Listeners: []config.Listener{{Local: "127.0.0.1:0", Target: "ssh"}},
+		Providers: []config.Provider{{Route: "ssh-stcp", Local: "127.0.0.1:2", Servers: []string{"default"}}},
 	}
 	if err := ccfg.Validate(); err != nil {
 		t.Fatal(err)

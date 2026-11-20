@@ -15,6 +15,8 @@
 //	0x2 PONG  heartbeat response (server -> client, payload echoes the PING)
 //	0x3 CLOSE graceful close request (payload is an optional reason)
 //	0x4 NOOP  padding; ignored by receivers (flushes CDN response buffers)
+//	0x5 START sent to an stcp provider stream when a visitor has been paired;
+//	    the provider dials its local service only after receiving it
 package protocol
 
 import (
@@ -36,6 +38,10 @@ const (
 	// TypeNoop is padding. Receivers ignore it; it exists so CDN/proxy
 	// response buffers are flushed early instead of holding small frames.
 	TypeNoop Type = 0x4
+	// TypeStart tells an stcp provider stream that a visitor is now paired.
+	// The provider waits for it before dialing its local service, so idle
+	// warm streams never hold a connection to the target.
+	TypeStart Type = 0x5
 )
 
 const (
@@ -76,6 +82,8 @@ func (t Type) String() string {
 		return "CLOSE"
 	case TypeNoop:
 		return "NOOP"
+	case TypeStart:
+		return "START"
 	default:
 		return fmt.Sprintf("0x%02x", byte(t))
 	}
@@ -122,7 +130,7 @@ func (rd *Reader) Read() (*Frame, error) {
 	}
 	f := &Frame{Type: Type(rd.buf[0])}
 	switch f.Type {
-	case TypeData, TypePing, TypePong, TypeClose, TypeNoop:
+	case TypeData, TypePing, TypePong, TypeClose, TypeNoop, TypeStart:
 	default:
 		return nil, ErrInvalidType
 	}

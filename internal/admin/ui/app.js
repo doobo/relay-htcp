@@ -520,6 +520,15 @@ function renderStatus(st) {
             esc(s.state) + "</span>",
           fmtMs(s.connected_at), fmtMs(s.last_pong_at),
         ])) +
+      ((c.providers || []).length
+        ? "<h3 class='muted' style='margin:14px 0 6px'>STCP 提供端</h3>" +
+          table(["路由", "本地服务", "服务端", "并发流"],
+            (c.providers || []).map((p) => [
+              esc(p.route), esc(p.local),
+              (p.servers && p.servers.length) ? esc(p.servers.join(", ")) : "全部",
+              String(p.pool),
+            ]))
+        : "") +
       "<h3 class='muted' style='margin:14px 0 6px'>本地监听</h3>" +
       table(["本地地址", "路由", "服务端", "策略", "活跃连接"],
         (c.listeners || []).map((l) => [

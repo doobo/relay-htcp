@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"relay-htcp/internal/config"
 	"relay-htcp/internal/protocol"
 )
 
@@ -148,7 +149,8 @@ func (s *Server) handleXHTTPPing(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleXHTTPDownload opens the server -> client side of a stream and keeps
-// the response body open, forwarding target bytes as frames.
+// the response body open, forwarding target bytes as frames. stcp routes pair
+// with the opposite role instead of dialing a target.
 func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgGet()
 	entry, ok := s.authenticate(r)
@@ -174,19 +176,50 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "route not permitted", http.StatusForbidden)
 		return
 	}
-	dest, ok := cfg.RouteTarget(route)
+	kind, ok := cfg.RouteKind(route)
 	if !ok {
 		http.Error(w, "unknown route", http.StatusNotFound)
 		return
 	}
+	role, ok := stcpRole(r)
+	if !ok {
+		http.Error(w, "invalid "+TunnelRoleHeader, http.StatusBadRequest)
+		return
+	}
+	if kind == config.RouteTypeSTCP {
+		conn, err := s.stcp.pair(r.Context(), route, role, cfg.Tunnel.STCPTimeout)
+		if err != nil {
+			if role == TunnelRoleProvider {
+				s.log.Debug("xhttp: stcp provider stream ended without a visitor", "route", route, "token", entry.name, "err", err)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			s.log.Warn("xhttp: stcp visitor found no provider", "route", route, "token", entry.name, "err", err)
+			http.Error(w, "no stcp provider available", http.StatusServiceUnavailable)
+			return
+		}
+		s.serveXHTTPDownload(w, r, entry, route, id, conn, role == TunnelRoleProvider)
+		return
+	}
+	if role == TunnelRoleProvider {
+		http.Error(w, "route is not an stcp route", http.StatusBadRequest)
+		return
+	}
 
+	dest, _ := cfg.RouteTarget(route)
 	conn, err := s.dialRoute(r.Context(), cfg, route, dest)
 	if err != nil {
 		s.log.Warn("xhttp: dial target failed", "route", route, "dest", dest, "proxy", cfg.Proxy.Enabled && cfg.RouteUsesProxy(route), "err", err)
 		http.Error(w, "target unavailable", http.StatusBadGateway)
 		return
 	}
+	s.serveXHTTPDownload(w, r, entry, route, id, conn, false)
+}
 
+// serveXHTTPDownload streams an established endpoint to the client as one
+// long-lived download response. sendStart tells the stcp provider that its
+// visitor is ready and it should dial its local service.
+func (s *Server) serveXHTTPDownload(w http.ResponseWriter, r *http.Request, entry *tokenEntry, route, id string, conn net.Conn, sendStart bool) {
 	fl, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
@@ -223,6 +256,11 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 		s.log.Info("xhttp stream closed", "route", route, "token", entry.name,
 			"session", id, "in", ss.bytesIn.Load(), "out", ss.bytesOut.Load())
 	}()
+	if sendStart {
+		if err := ss.send(&protocol.Frame{Type: protocol.TypeStart}); err != nil {
+			return
+		}
+	}
 
 	// target -> download
 	pumpDone := make(chan struct{})

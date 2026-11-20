@@ -13,6 +13,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		{Type: TypePing, Payload: []byte{0x00, 0x00, 0x00, 0x01}},
 		{Type: TypePong},
 		{Type: TypeClose, Payload: []byte("bye")},
+		{Type: TypeStart},
 	}
 	var buf bytes.Buffer
 	for i := range cases {

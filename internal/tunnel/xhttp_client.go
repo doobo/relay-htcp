@@ -84,11 +84,20 @@ func (p *Pool) openXHTTPStream(ctx context.Context, t *tunnel, route string, loc
 // dialXHTTPStream opens one download GET and reports whether the server
 // supports pipelined uploads.
 func (p *Pool) dialXHTTPStream(ctx context.Context, t *tunnel, route string) (*xhttpStream, error) {
+	return p.dialXHTTPStreamRole(ctx, t, route, "")
+}
+
+// dialXHTTPStreamRole is dialXHTTPStream with an explicit stcp role. An empty
+// role opens a normal visitor stream.
+func (p *Pool) dialXHTTPStreamRole(ctx context.Context, t *tunnel, route, role string) (*xhttpStream, error) {
 	sid, err := newXHTTPSessionID()
 	if err != nil {
 		return nil, err
 	}
 	q := url.Values{"session": {sid}, "target": {route}}
+	if role != "" {
+		q.Set("role", role)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		t.xhttpURL("/download")+"?"+q.Encode(), nil)
 	if err != nil {
@@ -96,6 +105,9 @@ func (p *Pool) dialXHTTPStream(ctx context.Context, t *tunnel, route string) (*x
 	}
 	p.applyTunnelHeaders(req, t)
 	req.Header.Set("X-Tunnel-Target", route)
+	if role != "" {
+		req.Header.Set(TunnelRoleHeader, role)
+	}
 	req.Header.Set("Cache-Control", "no-store")
 	resp, err := t.client.Do(req)
 	if err != nil {
@@ -104,6 +116,9 @@ func (p *Pool) dialXHTTPStream(ctx context.Context, t *tunnel, route string) (*x
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusNoContent {
+			return nil, errSTCPIdleStream
+		}
 		return nil, fmt.Errorf("server rejected xhttp download: %s %s", resp.Status, bytes.TrimSpace(body))
 	}
 	return &xhttpStream{
@@ -229,11 +244,16 @@ func (p *Pool) closeSparesXHTTP() {
 // runXHTTPStream binds an opened download stream to local and pumps both
 // directions until either side ends.
 func (p *Pool) runXHTTPStream(ctx context.Context, st *xhttpStream, local net.Conn, ac *activeConn) error {
+	return p.pumpXHTTPStream(ctx, st, protocol.NewReader(st.resp.Body), local, ac)
+}
+
+// pumpXHTTPStream is runXHTTPStream with the frame reader already positioned.
+// stcp providers read the START frame from it before calling this.
+func (p *Pool) pumpXHTTPStream(ctx context.Context, st *xhttpStream, rd *protocol.Reader, local net.Conn, ac *activeConn) error {
 	cfg := p.cfgGet()
 	route := st.route
 	t := st.tunnel
 	sid := st.sid
-	resp := st.resp
 	defer p.closeXHTTPStream(st)
 
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -302,7 +322,6 @@ func (p *Pool) runXHTTPStream(ctx context.Context, st *xhttpStream, local net.Co
 		}
 	}()
 
-	rd := protocol.NewReader(resp.Body)
 	for {
 		f, rerr := rd.Read()
 		if rerr != nil {

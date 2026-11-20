@@ -230,3 +230,53 @@ func TestBootstrapClient(t *testing.T) {
 		t.Fatalf("idle client with admin rejected: %v", err)
 	}
 }
+
+func TestClientProviders(t *testing.T) {
+	cfg := multiServerClient()
+	cfg.Providers = []Provider{{
+		Route: "h2", Local: "127.0.0.1:8080",
+		Servers: []string{"primary", "backup"},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Providers[0].Pool; got != 2 {
+		t.Fatalf("default pool = %d, want 2", got)
+	}
+	if got, want := cfg.Providers[0].Key(), "h2\x00127.0.0.1:8080"; got != want {
+		t.Fatalf("key = %q, want %q", got, want)
+	}
+
+	bad := multiServerClient()
+	bad.Providers = []Provider{{Route: "h2", Local: "127.0.0.1:8080", Servers: []string{"missing"}}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("unknown provider server accepted")
+	}
+
+	bad = multiServerClient()
+	bad.Providers = []Provider{{Route: "h2", Local: "8080"}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("provider local without a port accepted")
+	}
+
+	bad = multiServerClient()
+	bad.Providers = []Provider{
+		{Route: "h2", Local: "127.0.0.1:8080"},
+		{Route: "h2", Local: "127.0.0.1:8080"},
+	}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("duplicate provider accepted")
+	}
+
+	providerOnly := &ClientConfig{
+		Auth:      ClientAuth{Token: "token"},
+		Servers:   []ServerEndpoint{{Name: "a", URL: "https://a.example.com:443"}},
+		Providers: []Provider{{Route: "h2", Local: "127.0.0.1:8080", Pool: 4}},
+	}
+	if err := providerOnly.Validate(); err != nil {
+		t.Fatalf("provider-only client rejected: %v", err)
+	}
+	if providerOnly.Providers[0].Pool != 4 {
+		t.Fatalf("pool = %d", providerOnly.Providers[0].Pool)
+	}
+}

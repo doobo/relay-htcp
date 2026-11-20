@@ -365,10 +365,16 @@ func runClientOnce(cfgPath string) bool {
 		stopAdmin()
 		fatal(err)
 	}
+	if err := pool.StartProviders(ctx); err != nil {
+		pool.StopAllListeners()
+		stopAdmin()
+		fatal(err)
+	}
 
 	select {
 	case <-ctx.Done():
 		pool.StopAllListeners()
+		pool.StopAllProviders()
 		stopAdmin()
 		log.Info("client stopped")
 		return false
@@ -377,6 +383,7 @@ func runClientOnce(cfgPath string) bool {
 		// Release every listening socket before the next iteration binds
 		// them again.
 		pool.StopAllListeners()
+		pool.StopAllProviders()
 		stop()
 		stopAdmin()
 		return true

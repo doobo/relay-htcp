@@ -149,6 +149,10 @@ type Pool struct {
 	spares       map[string][]*xhttpStream
 	spareOpening map[string]bool
 
+	// stcp provider workers, keyed by config.Provider.Key().
+	pmu       sync.Mutex
+	providers map[string]*providerState
+
 	// traffic is the shared admin recorder (nil when the panel is disabled).
 	// Client-side rows are keyed by server name and route.
 	traffic atomic.Pointer[admin.TrafficStats]
@@ -162,6 +166,7 @@ func NewPool(cfg *config.ClientConfig, log *slog.Logger) (*Pool, error) {
 		listeners:    make(map[string]*listenerState),
 		spares:       make(map[string][]*xhttpStream),
 		spareOpening: make(map[string]bool),
+		providers:    make(map[string]*providerState),
 		startedAt:    time.Now(),
 	}
 	p.cfg.Store(cfg)

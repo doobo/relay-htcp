@@ -131,7 +131,16 @@ type ClientStatus struct {
 	Servers     []ServerStat   `json:"servers"`
 	Slots       []SlotStat     `json:"slots"`
 	Listeners   []ListenerStat `json:"listeners"`
+	Providers   []ProviderStat `json:"providers"`
 	ActiveConns []ConnStat     `json:"active_conns"`
+}
+
+// ProviderStat is one configured stcp provider entry.
+type ProviderStat struct {
+	Route   string   `json:"route"`
+	Local   string   `json:"local"`
+	Servers []string `json:"servers"`
+	Pool    int      `json:"pool"`
 }
 
 // ServerStat is one configured tunnel server and its pool state.

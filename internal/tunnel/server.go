@@ -129,12 +129,15 @@ type Server struct {
 	// xhttp transport sessions, keyed by the client-generated session id.
 	xmu       sync.Mutex
 	xsessions map[string]*xhttpSession
+
+	// stcp pairs provider and visitor streams on stcp routes.
+	stcp *stcpHub
 }
 
 // NewServer builds a Server from a validated configuration.
 func NewServer(cfg *config.ServerConfig, log *slog.Logger) *Server {
 	tokens := buildTokens(cfg)
-	s := &Server{log: log, xsessions: make(map[string]*xhttpSession)}
+	s := &Server{log: log, xsessions: make(map[string]*xhttpSession), stcp: newSTCPHub()}
 	s.cfg.Store(cfg)
 	s.tokens.Store(&tokens)
 	return s
@@ -437,7 +440,8 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleData serves one data stream: it authenticates, resolves the route,
-// dials the local target and pumps bytes in both directions.
+// then either dials the target (tcp routes) or pairs it with the other side
+// (stcp routes).
 func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgGet()
 	entry, ok := s.authenticate(r)
@@ -459,12 +463,26 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "route not permitted", http.StatusForbidden)
 		return
 	}
-	dest, ok := cfg.RouteTarget(route)
+	kind, ok := cfg.RouteKind(route)
 	if !ok {
 		http.Error(w, "unknown route", http.StatusNotFound)
 		return
 	}
+	role, ok := stcpRole(r)
+	if !ok {
+		http.Error(w, "invalid "+TunnelRoleHeader, http.StatusBadRequest)
+		return
+	}
+	if kind == config.RouteTypeSTCP {
+		s.handleSTCPData(w, r, cfg, entry, route, role)
+		return
+	}
+	if role == TunnelRoleProvider {
+		http.Error(w, "route is not an stcp route", http.StatusBadRequest)
+		return
+	}
 
+	dest, _ := cfg.RouteTarget(route)
 	conn, err := s.dialRoute(r.Context(), cfg, route, dest)
 	if err != nil {
 		s.log.Warn("dial target failed", "route", route, "dest", dest, "proxy", cfg.Proxy.Enabled && cfg.RouteUsesProxy(route), "err", err)
@@ -492,6 +510,80 @@ func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.log.Info("data stream closed", "route", route, "token", entry.name, "in", in, "out", out)
 	}
+}
+
+// stcpRole reads the stcp role from X-Tunnel-Role (or the role query
+// parameter for transports that cannot set the header). An empty value means
+// visitor, preserving compatibility with plain tcp-style streams.
+func stcpRole(r *http.Request) (string, bool) {
+	role := r.Header.Get(TunnelRoleHeader)
+	if role == "" {
+		role = r.URL.Query().Get("role")
+	}
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "":
+		return TunnelRoleVisitor, true
+	case TunnelRoleVisitor:
+		return TunnelRoleVisitor, true
+	case TunnelRoleProvider:
+		return TunnelRoleProvider, true
+	default:
+		return "", false
+	}
+}
+
+// handleSTCPData pairs the stream with its counterpart on the same route and
+// bridges the two. Pairing happens before the response headers are written, so
+// an unmatched visitor still gets a clean 503 and an idle provider stream can
+// be expired with 204. Once paired, the server sends the provider a START
+// frame so it dials its local service only at that point.
+func (s *Server) handleSTCPData(w http.ResponseWriter, r *http.Request, cfg *config.ServerConfig, entry *tokenEntry, route, role string) {
+	timeout := cfg.Tunnel.STCPTimeout
+	conn, err := s.stcp.pair(r.Context(), route, role, timeout)
+	if err != nil {
+		if role == TunnelRoleProvider {
+			// A warm provider stream that never paired is not an error: the
+			// client immediately opens a replacement.
+			s.log.Debug("stcp provider stream ended without a visitor", "route", route, "token", entry.name, "err", err)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		s.log.Warn("stcp visitor found no provider", "route", route, "token", entry.name, "err", err)
+		http.Error(w, "no stcp provider available", http.StatusServiceUnavailable)
+		return
+	}
+	if err := enableFullDuplex(w, r); err != nil {
+		_ = conn.Close()
+		http.Error(w, "HTTP/2 required for tunnel streams", http.StatusUpgradeRequired)
+		return
+	}
+	w.Header().Set("X-Tunnel-Protocol", "relay-htcp/1")
+	w.WriteHeader(http.StatusOK)
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
+	ss := s.registerStream(route, entry, r.RemoteAddr)
+	if role == TunnelRoleProvider {
+		if err := writeFrame(nil, w, &protocol.Frame{Type: protocol.TypeStart}); err != nil {
+			_ = conn.Close()
+			s.finishStream(ss, 0, 0)
+			return
+		}
+	}
+	in, out, perr := pipeBidir(protocol.NewReader(r.Body), w, conn)
+	s.finishStream(ss, in, out)
+	s.logSTCPEnd(role, route, entry, in, out, perr)
+}
+
+// logSTCPEnd reports a finished stcp stream without treating a normal hang-up
+// as an error.
+func (s *Server) logSTCPEnd(role, route string, entry *tokenEntry, in, out int64, err error) {
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+		s.log.Warn("stcp stream error", "role", role, "route", route, "token", entry.name, "in", in, "out", out, "err", err)
+		return
+	}
+	s.log.Info("stcp stream closed", "role", role, "route", route, "token", entry.name, "in", in, "out", out)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

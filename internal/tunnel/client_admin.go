@@ -70,6 +70,12 @@ func (p *Pool) Status() admin.Status {
 		st.Client.ActiveConns = append(st.Client.ActiveConns, cons...)
 	}
 	p.lmu.Unlock()
+	for _, pr := range cfg.Providers {
+		st.Client.Providers = append(st.Client.Providers, admin.ProviderStat{
+			Route: pr.Route, Local: pr.Local,
+			Servers: append([]string(nil), pr.Servers...), Pool: pr.Pool,
+		})
+	}
 	return st
 }
 
@@ -166,6 +172,41 @@ func (p *Pool) ApplyConfigYAML(y string) (admin.SaveReport, error) {
 	if changed {
 		report.Applied = append(report.Applied, "listeners")
 	}
+
+	// Reconcile stcp providers the same way: stop removed or changed entries,
+	// start new ones. Paired sessions on stopped entries end with their
+	// context.
+	oldProv := make(map[string]config.Provider, len(old.Providers))
+	for _, pr := range old.Providers {
+		oldProv[pr.Key()] = pr
+	}
+	newProv := make(map[string]config.Provider, len(newCfg.Providers))
+	for _, pr := range newCfg.Providers {
+		newProv[pr.Key()] = pr
+	}
+	changedProv := false
+	for _, pr := range newCfg.Providers {
+		oldP, exists := oldProv[pr.Key()]
+		if exists && reflect.DeepEqual(oldP, pr) {
+			continue
+		}
+		if exists {
+			p.StopProvider(pr.Key())
+		}
+		if err := p.StartProvider(p.runCtx, pr); err != nil {
+			return report, fmt.Errorf("start stcp provider %s: %w", pr.Route, err)
+		}
+		changedProv = true
+	}
+	for key := range oldProv {
+		if _, ok := newProv[key]; !ok {
+			p.StopProvider(key)
+			changedProv = true
+		}
+	}
+	if changedProv {
+		report.Applied = append(report.Applied, "providers")
+	}
 	if !reflect.DeepEqual(old.Disguise, newCfg.Disguise) {
 		report.Applied = append(report.Applied, "disguise")
 	}
@@ -243,6 +284,21 @@ func (p *Pool) ConfigFormSchema() admin.FormSchema {
 						{Path: "servers", Label: "选择服务端", Type: admin.FormMultiSelect, Options: serverNames,
 							Help: "下拉多选；留空 = 全部服务端"},
 						{Path: "strategy", Label: "选择策略", Type: admin.FormSelect, Options: []string{"round_robin", "failover"}},
+					}},
+			},
+		},
+		{
+			Title: "STCP 提供端",
+			Key:   "providers",
+			Fields: []admin.FormField{
+				{Path: "providers", Label: "提供端列表", Type: admin.FormTable,
+					Help: "把本机服务按 stcp 路由暴露；服务端该路由的 type 必须是 stcp。访问端仍用上面的本地监听，target 填同一个路由名。",
+					Columns: []admin.FormField{
+						{Path: "route", Label: "服务端路由", Type: admin.FormText, Placeholder: "h2"},
+						{Path: "local", Label: "本地服务", Type: admin.FormText, Placeholder: "127.0.0.1:8080"},
+						{Path: "servers", Label: "选择服务端", Type: admin.FormMultiSelect, Options: serverNames,
+							Help: "留空 = 全部服务端"},
+						{Path: "pool", Label: "并发流", Type: admin.FormNumber, Help: "每条流服务一个访问连接；默认 2"},
 					}},
 			},
 		},

@@ -23,11 +23,17 @@ auth:
       routes: [mysql]
 
 # Local targets exposed through the tunnel.
+# type defaults to tcp: the server dials target (host:port or an
+# http(s)://host[:port] URL). type: stcp does not dial anything; it pairs a
+# provider client (providers[] in its config) with a visitor listener, so the
+# target must stay empty. Both sides still need their token to allow the route.
 routes:
   - name: ssh
     target: "127.0.0.1:22"
   - name: mysql
     target: "127.0.0.1:3306"
+  # - name: h2
+  #   type: stcp
 
 tunnel:
   max_concurrent_streams: 128   # per HTTP/2 connection

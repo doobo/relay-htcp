@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestServerRouteProxySelection(t *testing.T) {
 	cfg := &ServerConfig{
@@ -110,5 +113,62 @@ func TestServerProxyValidation(t *testing.T) {
 	cfg.Proxy = ProxyConfig{}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("disabled proxy: %v", err)
+	}
+}
+
+func TestServerRouteTypes(t *testing.T) {
+	base := func() *ServerConfig {
+		return &ServerConfig{
+			Listen: "127.0.0.1:0",
+			Auth:   AuthConfig{Tokens: []Token{{Name: "t", Token: "token"}}},
+			Routes: []Route{
+				{Name: "tcp", Target: "127.0.0.1:22"},
+				{Name: "pair", Type: "stcp"},
+			},
+		}
+	}
+
+	cfg := base()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Routes[0].Type != RouteTypeTCP {
+		t.Fatalf("default type = %q, want %q", cfg.Routes[0].Type, RouteTypeTCP)
+	}
+	if !cfg.RouteIsSTCP("pair") {
+		t.Fatal("pair route is not stcp")
+	}
+	if kind, ok := cfg.RouteKind("tcp"); !ok || kind != RouteTypeTCP {
+		t.Fatalf("RouteKind(tcp) = %q %v", kind, ok)
+	}
+	if target, ok := cfg.RouteTarget("pair"); ok || target != "" {
+		t.Fatalf("stcp route reported target %q", target)
+	}
+	if cfg.Tunnel.STCPTimeout != 30*time.Second {
+		t.Fatalf("stcp default timeout = %v", cfg.Tunnel.STCPTimeout)
+	}
+
+	cfg = base()
+	cfg.Routes[0].Target = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("tcp route without target accepted")
+	}
+
+	cfg = base()
+	cfg.Routes[1].Target = "127.0.0.1:80"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("stcp route with target accepted")
+	}
+
+	cfg = base()
+	cfg.Routes[1].Type = "udp"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown route type accepted")
+	}
+
+	cfg = base()
+	cfg.Auth.Tokens[0].Routes = []string{"pair"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("token referencing an stcp route rejected: %v", err)
 	}
 }

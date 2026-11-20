@@ -186,6 +186,7 @@ func (s *Server) ConfigFormSchema() admin.FormSchema {
 				{Path: "tunnel.dial_timeout", Label: "内网拨号超时", Type: admin.FormDuration, Placeholder: "10s"},
 				{Path: "tunnel.idle_timeout", Label: "控制流空闲超时", Type: admin.FormDuration, Placeholder: "90s"},
 				{Path: "tunnel.xhttp_path", Label: "xhttp 路径", Type: admin.FormText, Placeholder: "/relay", Help: "默认 /relay，需与客户端 servers[].xhttp_path 一致"},
+				{Path: "tunnel.stcp_timeout", Label: "STCP 配对超时", Type: admin.FormDuration, Placeholder: "30s", Help: "提供端/访问端等待对端的最长时间；超时后提供端自动重开、访问端返回 503"},
 				{Path: "tunnel.quota_refresh", Label: "Token 流量限制刷新间隔", Type: admin.FormDuration, Placeholder: "5m", Help: "定时按日/周/月统计刷新每个 Token 的限制开关"},
 				{Path: "disguise.enabled", Label: "启用伪装（诱饵页与响应头）", Type: admin.FormBool},
 			},
@@ -206,9 +207,10 @@ func (s *Server) ConfigFormSchema() admin.FormSchema {
 			Title: "内网路由",
 			Fields: []admin.FormField{
 				{Path: "routes", Label: "路由列表", Type: admin.FormTable,
-					Help: "内网目标支持 host:port 或 http(s)://host[:port]（URL 仅用于确定目标主机和端口，路径不参与 TCP 转发）；勾选“走代理”的路由才会使用上面的出口代理。",
+					Help: "类型 tcp（默认）= 服务端拨号 target；stcp = 不拨号，把提供端与访问端两条客户端流配对，此时 target 留空。内网目标支持 host:port 或 http(s)://host[:port]（URL 仅用于确定目标主机和端口，路径不参与 TCP 转发）；勾选“走代理”的路由才会使用上面的出口代理。",
 					Columns: []admin.FormField{
 						{Path: "name", Label: "路由名", Type: admin.FormText, Placeholder: "ssh"},
+						{Path: "type", Label: "类型", Type: admin.FormSelect, Options: []string{"tcp", "stcp"}},
 						{Path: "target", Label: "内网目标", Type: admin.FormText, Placeholder: "127.0.0.1:22 或 https://host"},
 						{Path: "use_proxy", Label: "走代理", Type: admin.FormBool},
 					}},
