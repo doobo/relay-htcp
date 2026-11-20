@@ -579,7 +579,8 @@ func (s *Server) handleSTCPData(w http.ResponseWriter, r *http.Request, cfg *con
 // as an error.
 func (s *Server) logSTCPEnd(role, route string, entry *tokenEntry, in, out int64, err error) {
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) &&
-		!errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+		!errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, context.Canceled) &&
+		!errors.Is(err, net.ErrClosed) {
 		s.log.Warn("stcp stream error", "role", role, "route", route, "token", entry.name, "in", in, "out", out, "err", err)
 		return
 	}
