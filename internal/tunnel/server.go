@@ -2,7 +2,7 @@ package tunnel
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -84,6 +84,7 @@ type controlStat struct {
 // stats holds live server counters for the admin panel.
 type stats struct {
 	mu       sync.Mutex
+	seq      atomic.Int64
 	streams  map[int64]*streamStat
 	controls map[string]*controlStat
 	bytesIn  atomic.Uint64 // tunnel -> target
@@ -96,11 +97,27 @@ type adminMount struct {
 	h      http.Handler
 }
 
+// tokenSet is the immutable token snapshot swapped atomically on config apply.
+// index maps the SHA-256 digest of each raw token to its entry, so
+// authentication is a single map lookup instead of a scan.
+type tokenSet struct {
+	list  []tokenEntry
+	index map[[32]byte]*tokenEntry
+}
+
+func newTokenSet(list []tokenEntry) *tokenSet {
+	set := &tokenSet{list: list, index: make(map[[32]byte]*tokenEntry, len(list))}
+	for i := range set.list {
+		set.index[sha256.Sum256([]byte(set.list[i].raw))] = &set.list[i]
+	}
+	return set
+}
+
 // Server is the relay-htcp tunnel endpoint.
 type Server struct {
 	cfg    atomic.Pointer[config.ServerConfig]
 	log    *slog.Logger
-	tokens atomic.Pointer[[]tokenEntry]
+	tokens atomic.Pointer[tokenSet]
 	conns  atomic.Int64
 
 	listenAddr string
@@ -136,10 +153,9 @@ type Server struct {
 
 // NewServer builds a Server from a validated configuration.
 func NewServer(cfg *config.ServerConfig, log *slog.Logger) *Server {
-	tokens := buildTokens(cfg)
 	s := &Server{log: log, xsessions: make(map[string]*xhttpSession), stcp: newSTCPHub()}
 	s.cfg.Store(cfg)
-	s.tokens.Store(&tokens)
+	s.tokens.Store(newTokenSet(buildTokens(cfg)))
 	return s
 }
 
@@ -190,10 +206,11 @@ func (s *Server) tokenDenied(entry *tokenEntry) bool {
 // cfgGet returns the currently effective configuration.
 func (s *Server) cfgGet() *config.ServerConfig { return s.cfg.Load() }
 
-// authenticate checks the Authorization header against the cached token list
-// with constant-time comparison, keeping the timing uniform. The list and the
-// quota blocked set are atomics refreshed on config apply / by the quota task,
-// so authentication never queries the database.
+// authenticate looks the presented token up in the cached token index. The
+// lookup is keyed by the token's SHA-256 digest, so no secret is compared
+// byte by byte and the timing reveals nothing about the stored tokens. The
+// token set and the quota blocked set are atomics refreshed on config apply /
+// by the quota task, so authentication never queries the database.
 func (s *Server) authenticate(r *http.Request) (*tokenEntry, bool) {
 	const prefix = "Bearer "
 	auth := r.Header.Get("Authorization")
@@ -204,14 +221,8 @@ func (s *Server) authenticate(r *http.Request) (*tokenEntry, bool) {
 	if token == "" {
 		return nil, false
 	}
-	tokens := s.tokens.Load()
-	var matched *tokenEntry
-	for i := range *tokens {
-		if subtle.ConstantTimeCompare([]byte(token), []byte((*tokens)[i].raw)) == 1 {
-			matched = &(*tokens)[i]
-		}
-	}
-	return matched, matched != nil
+	entry := s.tokens.Load().index[sha256.Sum256([]byte(token))]
+	return entry, entry != nil
 }
 
 // registerControl records a live control stream for the admin view.
@@ -234,7 +245,7 @@ func (s *Server) unregisterControl(remote string) {
 // registerStream records a live data stream for the admin view.
 func (s *Server) registerStream(route string, entry *tokenEntry, remote string) *streamStat {
 	ss := &streamStat{
-		id:        time.Now().UnixNano(),
+		id:        s.st.seq.Add(1),
 		route:     route,
 		token:     entry.name,
 		tokenKey:  entry.statsKey,

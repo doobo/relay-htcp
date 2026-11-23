@@ -237,6 +237,21 @@ func (s *Store) GetSession(tokenHash string) (Session, error) {
 	return se, err
 }
 
+// GetSessionUser returns the enabled user behind a live session in one query.
+// ErrNotFound covers unknown or expired sessions and disabled users alike.
+func (s *Store) GetSessionUser(tokenHash string) (User, error) {
+	u, err := scanUser(s.Read().QueryRow(
+		`SELECT u.id, u.username, u.password_hash, u.role, u.enabled,
+			u.created_at, u.updated_at, u.last_login_at
+		 FROM admin_sessions se JOIN admin_users u ON u.id = se.user_id
+		 WHERE se.token_hash = ? AND se.expires_at > ? AND u.enabled = 1`,
+		tokenHash, nowMs()))
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	return u, err
+}
+
 // DeleteSession removes one session (logout).
 func (s *Store) DeleteSession(tokenHash string) error {
 	_, err := s.Write().Exec(`DELETE FROM admin_sessions WHERE token_hash = ?`, tokenHash)

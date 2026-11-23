@@ -136,7 +136,6 @@ type Pool struct {
 	log       *slog.Logger
 	servers   []*serverState
 	next      atomic.Uint64
-	changes   chan struct{}
 	startedAt time.Time
 	runCtx    context.Context
 
@@ -156,13 +155,18 @@ type Pool struct {
 	// traffic is the shared admin recorder (nil when the panel is disabled).
 	// Client-side rows are keyed by server name and route.
 	traffic atomic.Pointer[admin.TrafficStats]
+
+	// changeCh is closed and replaced whenever tunnel availability changes,
+	// waking every waiter at once; see changed and signalChange.
+	changeMu sync.Mutex
+	changeCh chan struct{}
 }
 
 // NewPool builds the tunnel connection pools, one set of slots per server.
 func NewPool(cfg *config.ClientConfig, log *slog.Logger) (*Pool, error) {
 	p := &Pool{
 		log:          log,
-		changes:      make(chan struct{}, 1),
+		changeCh:     make(chan struct{}),
 		listeners:    make(map[string]*listenerState),
 		spares:       make(map[string][]*xhttpStream),
 		spareOpening: make(map[string]bool),
@@ -241,23 +245,19 @@ func (p *Pool) acquire(ctx context.Context, timeout time.Duration, l config.List
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("no eligible server left for listener %s", l.Local)
 	}
-	deadline := time.Now().Add(timeout)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	for {
+		changed := p.changed()
 		if t := p.pick(servers, l.Strategy); t != nil {
 			return t, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("no live tunnel available (waited %s)", timeout)
-		}
-		wait := 200 * time.Millisecond
-		if rem := time.Until(deadline); wait > rem {
-			wait = rem
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-p.changes:
-		case <-time.After(wait):
+		case <-changed:
+		case <-deadline.C:
+			return nil, fmt.Errorf("no live tunnel available (waited %s)", timeout)
 		}
 	}
 }
@@ -537,11 +537,19 @@ func (p *Pool) keepAlive(ctx context.Context, srv *serverState, idx int, s *slot
 	}
 }
 
+// changed returns a channel that is closed on the next availability change.
+// Read it before checking the state so a change in between is not missed.
+func (p *Pool) changed() <-chan struct{} {
+	p.changeMu.Lock()
+	defer p.changeMu.Unlock()
+	return p.changeCh
+}
+
 func (p *Pool) signalChange() {
-	select {
-	case p.changes <- struct{}{}:
-	default:
-	}
+	p.changeMu.Lock()
+	close(p.changeCh)
+	p.changeCh = make(chan struct{})
+	p.changeMu.Unlock()
 }
 
 // dial opens the control stream on the tunnel.

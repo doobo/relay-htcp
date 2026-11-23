@@ -27,6 +27,11 @@ const (
 	TrafficScopeClient = "client"
 
 	trafficFlushInterval = 30 * time.Second
+
+	// maxPendingKeys bounds the in-memory accumulator. Counters for new
+	// buckets beyond it are dropped, which Task.md accepts (partial loss), so
+	// a failing database cannot grow memory without limit.
+	maxPendingKeys = 50000
 )
 
 // TrafficRow is one aggregated daily traffic row.
@@ -56,6 +61,7 @@ type TrafficStats struct {
 
 	mu      sync.Mutex
 	pending map[trafficKey]*TrafficRow
+	dropped int64
 
 	startOnce sync.Once
 }
@@ -92,6 +98,11 @@ func (t *TrafficStats) Record(scope, token, server, route string, in, out int64)
 	t.mu.Lock()
 	row := t.pending[key]
 	if row == nil {
+		if len(t.pending) >= maxPendingKeys {
+			t.dropped++
+			t.mu.Unlock()
+			return
+		}
 		row = &TrafficRow{Day: key.day, Token: token, Server: server, Route: route}
 		t.pending[key] = row
 	}
@@ -137,7 +148,12 @@ func (t *TrafficStats) Flush() error {
 	}
 	batch := t.pending
 	t.pending = make(map[trafficKey]*TrafficRow)
+	dropped := t.dropped
+	t.dropped = 0
 	t.mu.Unlock()
+	if dropped > 0 && t.log != nil {
+		t.log.Warn("traffic counters dropped, pending buffer full", "buckets", dropped)
+	}
 
 	err := t.store.Transaction(func(tx *sql.Tx) error {
 		now := nowMs()
@@ -164,6 +180,10 @@ func (t *TrafficStats) Flush() error {
 			if cur := t.pending[key]; cur != nil {
 				cur.BytesIn += row.BytesIn
 				cur.BytesOut += row.BytesOut
+				continue
+			}
+			if len(t.pending) >= maxPendingKeys {
+				t.dropped++
 				continue
 			}
 			t.pending[key] = row
@@ -246,6 +266,53 @@ func (t *TrafficStats) Usage(scope, token, fromDay, toDay string) (in, out int64
 		 WHERE scope = ? AND token = ? AND day >= ? AND day <= ?`,
 		scope, token, fromDay, toDay).Scan(&in, &out)
 	return in, out, err
+}
+
+// PeriodTotals holds one token's byte totals for the current day, week and
+// month periods.
+type PeriodTotals struct {
+	Day   int64
+	Week  int64
+	Month int64
+}
+
+// PeriodTotals returns the day/week/month totals of every token in scope,
+// keyed by token, using one aggregate query. The period starts must be day
+// keys, and today is the inclusive upper bound.
+func (t *TrafficStats) PeriodTotals(scope, dayStart, weekStart, monthStart, today string) (map[string]PeriodTotals, error) {
+	if t == nil {
+		return nil, nil
+	}
+	_ = t.Flush()
+	earliest := dayStart
+	for _, s := range []string{weekStart, monthStart} {
+		if s < earliest {
+			earliest = s
+		}
+	}
+	rows, err := t.store.Read().Query(
+		`SELECT token,
+			COALESCE(SUM(CASE WHEN day >= ? THEN bytes_in + bytes_out ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN day >= ? THEN bytes_in + bytes_out ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN day >= ? THEN bytes_in + bytes_out ELSE 0 END), 0)
+		 FROM traffic_daily
+		 WHERE scope = ? AND day >= ? AND day <= ?
+		 GROUP BY token`,
+		dayStart, weekStart, monthStart, scope, earliest, today)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]PeriodTotals)
+	for rows.Next() {
+		var token string
+		var p PeriodTotals
+		if err := rows.Scan(&token, &p.Day, &p.Week, &p.Month); err != nil {
+			return nil, err
+		}
+		out[token] = p
+	}
+	return out, rows.Err()
 }
 
 func (t *TrafficStats) queryRows(query string, args ...any) ([]TrafficRow, error) {

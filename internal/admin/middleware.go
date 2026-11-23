@@ -55,13 +55,8 @@ func (a *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, withIdentity(r, staticTokenIdentity()))
 			return
 		}
-		se, err := a.store.GetSession(SHA256Hex(token))
+		u, err := a.store.GetSessionUser(SHA256Hex(token))
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "authentication required")
-			return
-		}
-		u, err := a.store.GetUser(se.UserID)
-		if err != nil || !u.Enabled {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}

@@ -44,8 +44,8 @@ func (s *Server) startQuotaLoop(ctx context.Context) {
 
 // refreshTokenLimits recomputes the blocked set from the daily traffic table.
 func (s *Server) refreshTokenLimits() {
-	tokens := s.tokens.Load()
-	if tokens == nil {
+	set := s.tokens.Load()
+	if set == nil {
 		return
 	}
 	traffic := s.trafficStats()
@@ -56,12 +56,19 @@ func (s *Server) refreshTokenLimits() {
 		weekStart := admin.PeriodStartDay("week", now)
 		monthStart := admin.PeriodStartDay("month", now)
 		today := admin.DayString(now)
-		for i := range *tokens {
-			entry := &(*tokens)[i]
+		totals, err := traffic.PeriodTotals(admin.TrafficScopeServer, dayStart, weekStart, monthStart, today)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("token quota refresh failed, keeping previous state", "err", err)
+			}
+			return
+		}
+		for i := range set.list {
+			entry := &set.list[i]
 			if !entry.limitEnabled || entry.statsKey == "" {
 				continue
 			}
-			if exceedsLimit(traffic, entry, dayStart, weekStart, monthStart, today) {
+			if exceedsLimit(totals[entry.statsKey], entry) {
 				next[entry.statsKey] = true
 			}
 		}
@@ -84,26 +91,8 @@ func (s *Server) refreshTokenLimits() {
 	}
 }
 
-func exceedsLimit(t *admin.TrafficStats, entry *tokenEntry,
-	dayStart, weekStart, monthStart, today string) bool {
-	for _, period := range []struct {
-		limit int64
-		from  string
-	}{
-		{entry.dailyLimit, dayStart},
-		{entry.weeklyLimit, weekStart},
-		{entry.monthlyLimit, monthStart},
-	} {
-		if period.limit <= 0 {
-			continue
-		}
-		in, out, err := t.Usage(admin.TrafficScopeServer, entry.statsKey, period.from, today)
-		if err != nil {
-			continue
-		}
-		if in+out >= period.limit {
-			return true
-		}
-	}
-	return false
+func exceedsLimit(totals admin.PeriodTotals, entry *tokenEntry) bool {
+	return (entry.dailyLimit > 0 && totals.Day >= entry.dailyLimit) ||
+		(entry.weeklyLimit > 0 && totals.Week >= entry.weeklyLimit) ||
+		(entry.monthlyLimit > 0 && totals.Month >= entry.monthlyLimit)
 }

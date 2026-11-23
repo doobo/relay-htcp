@@ -175,18 +175,17 @@ func (p *Pool) providerWorker(ctx context.Context, srv *serverState, pr config.P
 
 // waitTunnel blocks until the server has a live tunnel or ctx ends.
 func (p *Pool) waitTunnel(ctx context.Context, srv *serverState) *tunnel {
-	for ctx.Err() == nil {
+	for {
+		changed := p.changed()
 		if t := srv.acquire(); t != nil && !t.closed() {
 			return t
 		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-p.changes:
-		case <-time.After(200 * time.Millisecond):
+		case <-changed:
 		}
 	}
-	return nil
 }
 
 // runProviderStream opens one provider stream and serves it until the server

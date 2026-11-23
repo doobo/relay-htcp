@@ -115,8 +115,7 @@ func (s *Server) ApplyConfig(newCfg *config.ServerConfig) (admin.SaveReport, err
 		report.RestartRequired = append(report.RestartRequired, "log.level")
 	}
 
-	tokens := buildTokens(newCfg)
-	s.tokens.Store(&tokens)
+	s.tokens.Store(newTokenSet(buildTokens(newCfg)))
 	s.cfg.Store(newCfg)
 
 	if !reflect.DeepEqual(old.Auth.Tokens, newCfg.Auth.Tokens) {
