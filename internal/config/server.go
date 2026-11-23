@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +80,10 @@ type Route struct {
 	// one is enabled. Other routes keep dialing directly. Only meaningful
 	// for tcp routes.
 	UseProxy bool `yaml:"use_proxy,omitempty"`
+	// Bind, for stcp routes only, makes the server listen on this address
+	// (for example 127.0.0.1:1234 or 0.0.0.0:1234) and expose the route
+	// directly: every accepted connection is paired with a provider client.
+	Bind string `yaml:"bind,omitempty"`
 }
 
 // Route types.
@@ -171,6 +176,7 @@ func (c *ServerConfig) Validate() error {
 	c.routeProxy = make(map[string]bool, len(c.Routes))
 	c.routeType = make(map[string]string, len(c.Routes))
 	seenRoutes := map[string]bool{}
+	seenBinds := map[string]bool{}
 	for i := range c.Routes {
 		r := &c.Routes[i]
 		if r.Name == "" {
@@ -196,7 +202,23 @@ func (c *ServerConfig) Validate() error {
 			if strings.TrimSpace(r.Target) != "" {
 				return fmt.Errorf("routes: target must be empty for stcp route %q", r.Name)
 			}
+			if bind := strings.TrimSpace(r.Bind); bind != "" {
+				if err := validateBind(bind); err != nil {
+					return fmt.Errorf("routes: bind for %q: %w", r.Name, err)
+				}
+				if bind == c.Listen {
+					return fmt.Errorf("routes: bind for %q must differ from listen", r.Name)
+				}
+				if seenBinds[bind] {
+					return fmt.Errorf("routes: duplicate bind %q", bind)
+				}
+				seenBinds[bind] = true
+				r.Bind = bind
+			}
 			continue
+		}
+		if r.Bind != "" {
+			return fmt.Errorf("routes: bind is only supported for stcp routes (%q)", r.Name)
 		}
 		if r.Target == "" {
 			return fmt.Errorf("routes: target is required for tcp route %q", r.Name)
@@ -264,6 +286,20 @@ func (c *ServerConfig) Validate() error {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// validateBind checks a stcp route's exposed listen address: host:port with a
+// port in 1-65535. An empty host means all interfaces.
+func validateBind(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("must be host:port: %w", err)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid port %q", port)
+	}
+	return nil
+}
 
 // BootstrapServer builds a minimal, valid configuration used when the server
 // starts without a config file. The admin panel is enabled on the tunnel port

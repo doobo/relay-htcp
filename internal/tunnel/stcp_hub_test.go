@@ -19,7 +19,7 @@ func TestSTCPHubPairsByRole(t *testing.T) {
 	}
 	provCh := make(chan result, 1)
 	go func() {
-		conn, err := h.pair(ctx, "route", TunnelRoleProvider, time.Second)
+		conn, err := h.pair(ctx, "route", TunnelRoleProvider, "p1", time.Second)
 		provCh <- result{conn, err}
 	}()
 
@@ -31,7 +31,7 @@ func TestSTCPHubPairsByRole(t *testing.T) {
 		t.Fatal("provider stream was not queued")
 	}
 
-	visitor, err := h.pair(ctx, "route", TunnelRoleVisitor, time.Second)
+	visitor, err := h.pair(ctx, "route", TunnelRoleVisitor, "", time.Second)
 	if err != nil {
 		t.Fatalf("visitor pair: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestSTCPHubPairsByRole(t *testing.T) {
 func TestSTCPHubTimeout(t *testing.T) {
 	h := newSTCPHub()
 	start := time.Now()
-	_, err := h.pair(context.Background(), "route", TunnelRoleVisitor, 40*time.Millisecond)
+	_, err := h.pair(context.Background(), "route", TunnelRoleVisitor, "", 40*time.Millisecond)
 	if !errors.Is(err, errSTCPNoPeer) {
 		t.Fatalf("err = %v, want errSTCPNoPeer", err)
 	}

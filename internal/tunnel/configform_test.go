@@ -73,8 +73,10 @@ func TestConfigFormSchemaMatchesYAML(t *testing.T) {
 				row, _ := rows[0].(map[string]any)
 				for _, col := range f.Columns {
 					if _, ok := row[col.Path]; !ok {
-						// Optional bool cells may be omitted (unset = false).
-						if col.Type == admin.FormBool {
+						// Optional cells may be omitted from YAML: bool cells
+						// (unset = false) and omitempty fields such as the
+						// stcp-only bind address.
+						if col.Type == admin.FormBool || col.Path == "bind" {
 							continue
 						}
 						t.Errorf("%s: table %q column %q missing", name, f.Path, col.Path)

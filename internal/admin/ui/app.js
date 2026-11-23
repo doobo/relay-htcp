@@ -768,8 +768,46 @@ function inputHTML(f, value, colPath) {
   }
 }
 
+// The routes table shows one address cell for both route types: the cell is
+// the tcp target or the stcp server-exposed bind, depending on the row's type.
+const SHARED_ADDR_TABLE = "routes";
+
+function tableColumns(f) {
+  if (f.path !== SHARED_ADDR_TABLE) return f.columns;
+  return f.columns.filter((c) => c.path !== "bind").map((c) =>
+    c.path === "target" ? Object.assign({}, c, { label: "地址" }) : c);
+}
+
+function sharedAddrColumn(stcp) {
+  return stcp ? "bind" : "target";
+}
+
+function sharedAddrPlaceholder(stcp) {
+  return stcp ? "127.0.0.1:1234（可选，服务端暴露）" : "127.0.0.1:22 或 https://host";
+}
+
+function sharedAddrHTML(row) {
+  const stcp = !!row && row.type === "stcp";
+  return inputHTML({ type: "text", placeholder: sharedAddrPlaceholder(stcp) },
+    row ? row[sharedAddrColumn(stcp)] : "", sharedAddrColumn(stcp));
+}
+
+// Switching a row's type moves the address cell to the matching key and
+// clears it, so a tcp target never leaks into a stcp bind or the reverse.
+function switchRouteAddr(tr) {
+  const typeEl = tr.querySelector('[data-col="type"]');
+  const input = tr.querySelector('input[data-col="target"], input[data-col="bind"]');
+  if (!typeEl || !input) return;
+  const stcp = typeEl.value === "stcp";
+  const col = sharedAddrColumn(stcp);
+  if (input.dataset.col === col) return;
+  input.dataset.col = col;
+  input.placeholder = sharedAddrPlaceholder(stcp);
+  input.value = "";
+}
+
 function tableFieldHTML(f, rows) {
-  const head = f.columns.map((c) =>
+  const head = tableColumns(f).map((c) =>
     "<th" + (c.type === "bool" ? ' class="col-bool"' : "") + ">" +
       esc(c.label) + "</th>").join("") + "<th>操作</th>";
   const body = rows.map((row) => tableRowHTML(f, row)).join("");
@@ -787,9 +825,13 @@ function tableFieldHTML(f, rows) {
 
 function tableRowHTML(f, row) {
   const id = row && row._id != null ? row._id : -1;
-  const cells = f.columns.map((c) =>
-    "<td" + (c.type === "bool" ? ' class="col-bool"' : "") + ">" +
-      inputHTML(c, row ? row[c.path] : "", c.path) + "</td>").join("");
+  const cells = tableColumns(f).map((c) => {
+    if (f.path === SHARED_ADDR_TABLE && c.path === "target") {
+      return "<td>" + sharedAddrHTML(row) + "</td>";
+    }
+    return "<td" + (c.type === "bool" ? ' class="col-bool"' : "") + ">" +
+      inputHTML(c, row ? row[c.path] : "", c.path) + "</td>";
+  }).join("");
   return '<tr data-id="' + id + '">' + cells +
     '<td><button type="button" class="small danger" data-act="del-row">删除</button></td></tr>';
 }
@@ -1452,6 +1494,9 @@ $("#cfg-form").addEventListener("click", configFormAction);
 $("#cfg-form").addEventListener("change", (e) => {
   const ms = e.target.closest(".multi-select");
   if (ms && e.target.matches('input[type="checkbox"]')) refreshMultiSelectLabel(ms);
+  if (e.target.matches('table[data-table="routes"] select[data-col="type"]')) {
+    switchRouteAddr(e.target.closest("tr"));
+  }
 });
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".multi-select")) closeMultiSelects();

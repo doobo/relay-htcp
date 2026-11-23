@@ -117,6 +117,7 @@ func (s *Server) ApplyConfig(newCfg *config.ServerConfig) (admin.SaveReport, err
 
 	s.tokens.Store(newTokenSet(buildTokens(newCfg)))
 	s.cfg.Store(newCfg)
+	s.syncSTCPExposure()
 
 	if !reflect.DeepEqual(old.Auth.Tokens, newCfg.Auth.Tokens) {
 		report.Applied = append(report.Applied, "auth.tokens")
@@ -206,11 +207,12 @@ func (s *Server) ConfigFormSchema() admin.FormSchema {
 			Title: "内网路由",
 			Fields: []admin.FormField{
 				{Path: "routes", Label: "路由列表", Type: admin.FormTable,
-					Help: "类型 tcp（默认）= 服务端拨号 target；stcp = 不拨号，把提供端与访问端两条客户端流配对，此时 target 留空。内网目标支持 host:port 或 http(s)://host[:port]（URL 仅用于确定目标主机和端口，路径不参与 TCP 转发）；勾选“走代理”的路由才会使用上面的出口代理。",
+					Help: "“地址”列随类型切换：tcp（默认）= 内网目标，服务端拨号；stcp = 服务端暴露地址（可选，如 127.0.0.1:1234 或 0.0.0.0:1234），服务端直接监听该地址，每个连接按来源 IP 哈希分配到固定的提供端客户端，不填则只能由客户端访问端配对。内网目标支持 host:port 或 http(s)://host[:port]（URL 仅用于确定目标主机和端口，路径不参与 TCP 转发）；勾选“走代理”的路由才会使用上面的出口代理。",
 					Columns: []admin.FormField{
 						{Path: "name", Label: "路由名", Type: admin.FormText, Placeholder: "ssh"},
 						{Path: "type", Label: "类型", Type: admin.FormSelect, Options: []string{"tcp", "stcp"}},
 						{Path: "target", Label: "内网目标", Type: admin.FormText, Placeholder: "127.0.0.1:22 或 https://host"},
+						{Path: "bind", Label: "服务端暴露地址", Type: admin.FormText, Placeholder: "127.0.0.1:1234（仅 stcp）"},
 						{Path: "use_proxy", Label: "走代理", Type: admin.FormBool},
 					}},
 			},

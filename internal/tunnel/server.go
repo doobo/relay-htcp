@@ -149,6 +149,10 @@ type Server struct {
 
 	// stcp pairs provider and visitor streams on stcp routes.
 	stcp *stcpHub
+	// stcpMu guards the exposed stcp listeners (see stcp_expose.go).
+	stcpMu    sync.Mutex
+	exposeCtx context.Context
+	exposed   map[string]*stcpExposure
 }
 
 // NewServer builds a Server from a validated configuration.
@@ -550,7 +554,7 @@ func stcpRole(r *http.Request) (string, bool) {
 // frame so it dials its local service only at that point.
 func (s *Server) handleSTCPData(w http.ResponseWriter, r *http.Request, cfg *config.ServerConfig, entry *tokenEntry, route, role string) {
 	timeout := cfg.Tunnel.STCPTimeout
-	conn, err := s.stcp.pair(r.Context(), route, role, timeout)
+	conn, err := s.stcp.pair(r.Context(), route, role, entry.statsKey, timeout)
 	if err != nil {
 		if role == TunnelRoleProvider {
 			// A warm provider stream that never paired is not an error: the
@@ -663,6 +667,7 @@ func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 
 	// Re-evaluate token traffic limits at startup and periodically.
 	s.startQuotaLoop(ctx)
+	s.startSTCPExposure(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

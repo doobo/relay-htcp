@@ -156,6 +156,10 @@ type ServerEndpoint struct {
 	// XHTTPPath overrides the xhttp endpoint prefix. Defaults to /relay and
 	// must match the server's tunnel.xhttp_path.
 	XHTTPPath string `yaml:"xhttp_path"`
+	// UseProxy sends this server's tunnel connections through the outbound
+	// proxy (proxy.enabled must be true). Off by default; the proxy never
+	// applies to a server unless it opts in here.
+	UseProxy bool `yaml:"use_proxy,omitempty"`
 }
 
 // ResolvedServer is a fully resolved server endpoint (defaults applied).
@@ -166,6 +170,7 @@ type ResolvedServer struct {
 	TLS       ClientTLS
 	Transport string
 	XHTTPPath string
+	UseProxy  bool
 }
 
 // Listener maps a local port to a server-side route.
@@ -192,6 +197,9 @@ type Provider struct {
 	Servers []string `yaml:"servers"`
 	// Pool is how many provider streams to keep per server. Defaults to 2.
 	Pool int `yaml:"pool"`
+	// UseProxy makes this client dial Local through the outbound proxy
+	// (proxy.enabled must be true). Other providers dial directly.
+	UseProxy bool `yaml:"use_proxy,omitempty"`
 }
 
 // Key identifies a provider entry for hot-apply reconciliation.
@@ -241,7 +249,8 @@ func (c *ClientConfig) Validate() error {
 		return fmt.Errorf("server: cannot be combined with servers; use servers only")
 	}
 	if len(c.Servers) == 0 && c.Server != "" {
-		c.Servers = []ServerEndpoint{{Name: "default", URL: c.Server}}
+		// The legacy single server always followed the global proxy setting.
+		c.Servers = []ServerEndpoint{{Name: "default", URL: c.Server, UseProxy: c.Proxy.Enabled}}
 		c.Server = ""
 	}
 	// A client with the admin panel enabled may start empty: this is the
@@ -277,6 +286,9 @@ func (c *ClientConfig) Validate() error {
 		default:
 			return fmt.Errorf("servers[%d].transport: must be %s or %s, got %q",
 				i, TransportHTTP, TransportXHTTP, s.Transport)
+		}
+		if s.UseProxy && !c.Proxy.Enabled {
+			return fmt.Errorf("servers[%d].use_proxy: requires proxy.enabled", i)
 		}
 		xhttpPath, err := NormalizeXHTTPPath(s.XHTTPPath)
 		if err != nil {
@@ -335,6 +347,9 @@ func (c *ClientConfig) Validate() error {
 		}
 		if p.Pool > 128 {
 			return fmt.Errorf("providers[%d].pool: must be at most 128, got %d", i, p.Pool)
+		}
+		if p.UseProxy && !c.Proxy.Enabled {
+			return fmt.Errorf("providers[%d].use_proxy: requires proxy.enabled", i)
 		}
 		key := p.Key()
 		if seenProviders[key] {
@@ -423,7 +438,7 @@ func validateServerURL(raw string) error {
 func (c *ClientConfig) ResolvedServers() []ResolvedServer {
 	servers := c.Servers
 	if len(servers) == 0 && c.Server != "" {
-		servers = []ServerEndpoint{{Name: "default", URL: c.Server}}
+		servers = []ServerEndpoint{{Name: "default", URL: c.Server, UseProxy: c.Proxy.Enabled}}
 	}
 	out := make([]ResolvedServer, 0, len(servers))
 	for _, s := range servers {
@@ -452,7 +467,7 @@ func (c *ClientConfig) ResolvedServers() []ResolvedServer {
 		}
 		out = append(out, ResolvedServer{
 			Name: name, URL: s.URL, Token: token, TLS: tlsCfg,
-			Transport: transport, XHTTPPath: xhttpPath,
+			Transport: transport, XHTTPPath: xhttpPath, UseProxy: s.UseProxy,
 		})
 	}
 	return out

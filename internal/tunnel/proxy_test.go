@@ -284,6 +284,7 @@ func startClientWithProxy(t *testing.T, serverAddr string, tlsSkip bool, proxy c
 		Auth: config.ClientAuth{Token: testToken},
 		Servers: []config.ServerEndpoint{{
 			Name: "proxy", URL: serverAddr, Transport: config.TransportHTTP,
+			UseProxy: true,
 		}},
 		Proxy: proxy,
 		Listeners: []config.Listener{{

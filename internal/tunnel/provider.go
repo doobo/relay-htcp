@@ -253,7 +253,7 @@ func (p *Pool) runHTTPProvider(ctx context.Context, t *tunnel, pr config.Provide
 		return nil
 	}
 
-	local, err := net.DialTimeout("tcp", pr.Local, providerStreamDialTimeout)
+	local, err := p.dialProviderLocal(ctx, pr)
 	if err != nil {
 		_ = pwr.Close()
 		return fmt.Errorf("dial provider local %s: %w", pr.Local, err)
@@ -291,7 +291,7 @@ func (p *Pool) runXHTTPProvider(ctx context.Context, t *tunnel, pr config.Provid
 		return nil
 	}
 
-	local, err := net.DialTimeout("tcp", pr.Local, providerStreamDialTimeout)
+	local, err := p.dialProviderLocal(ctx, pr)
 	if err != nil {
 		return fmt.Errorf("dial provider local %s: %w", pr.Local, err)
 	}
@@ -302,6 +302,25 @@ func (p *Pool) runXHTTPProvider(ctx context.Context, t *tunnel, pr config.Provid
 		return err
 	}
 	return nil
+}
+
+// dialProviderLocal dials the provider's local service. A provider with
+// use_proxy goes through the outbound proxy; the others dial directly.
+func (p *Pool) dialProviderLocal(ctx context.Context, pr config.Provider) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, providerStreamDialTimeout)
+	defer cancel()
+	if pr.UseProxy {
+		px := p.cfgGet().Proxy
+		if !px.Enabled {
+			return nil, fmt.Errorf("use_proxy is set but proxy is disabled")
+		}
+		conn, err := dialViaProxy(ctx, px, pr.Local, providerStreamDialTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("proxy %s: %w", px.Address, err)
+		}
+		return conn, nil
+	}
+	return (&net.Dialer{Timeout: providerStreamDialTimeout}).DialContext(ctx, "tcp", pr.Local)
 }
 
 // waitStreamStart consumes frames until the server says the stream is paired.

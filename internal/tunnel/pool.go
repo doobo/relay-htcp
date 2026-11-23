@@ -178,7 +178,7 @@ func NewPool(cfg *config.ClientConfig, log *slog.Logger) (*Pool, error) {
 		srv := &serverState{name: rs.Name, url: rs.URL, token: rs.Token,
 			transport: rs.Transport, xhttpPath: rs.XHTTPPath}
 		for i := 0; i < cfg.Tunnel.Connections; i++ {
-			client, err := newSlotClient(rs.URL, rs.TLS, cfg.Proxy)
+			client, err := newSlotClient(rs.URL, rs.TLS, serverProxy(rs, cfg.Proxy))
 			if err != nil {
 				return nil, fmt.Errorf("server %s: %w", rs.Name, err)
 			}
@@ -640,6 +640,16 @@ func (p *Pool) heartbeat(ctx context.Context, server string, idx int, t *tunnel)
 			}
 		}
 	}
+}
+
+// serverProxy returns the outbound proxy for a server's tunnel connections.
+// Only servers that opted in with use_proxy get one; the rest connect
+// directly, so proxy-only providers never break the control path.
+func serverProxy(rs config.ResolvedServer, px config.ClientProxy) config.ClientProxy {
+	if rs.UseProxy {
+		return px
+	}
+	return config.ClientProxy{}
 }
 
 // newSlotClient builds one HTTP/2-capable client for a server address. Each

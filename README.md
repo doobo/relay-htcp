@@ -434,6 +434,22 @@ listeners:
 - 提供端收到 `START` 帧后才拨号 `providers[].local`，空闲流不会占用本地服务的连接。
 - `http` 和 `xhttp` 两种传输都支持 stcp；xhttp 下每条提供流同样是一条长下载 GET + 短上传 POST。
 
+#### 服务端直接暴露（`bind`）
+
+stcp 路由可以再声明 `bind`，服务端直接在该地址监听，访问端就是直连服务端的 TCP 客户：
+
+```yaml
+routes:
+  - name: h2
+    type: stcp
+    bind: "127.0.0.1:1234"   # 或 0.0.0.0:1234，对外暴露
+```
+
+- 同一路由有多个提供端客户端时，按**来源 IP 哈希**分配：对每个可用 Token 计算 `sha256(客户端IP + Token)` 并排序，同一 IP 始终落到排名最高且在线的提供端；它离线时顺延到下一个在线的提供端，恢复后再回到它。
+- 配额已超限的 Token 不参与分配。
+- `bind` 只允许 stcp 路由使用，不能与 `listen` 相同，同一地址不能被两条路由共用；修改后热加载生效。
+- 暴露端口是明文 TCP，没有 Token 校验，仅在需要对外提供的场景下使用，并通过防火墙限制来源。
+
 ## 配置参考
 
 配置采用 YAML，启动时校验；未知字段会被忽略，必填项缺失会直接报错退出。`log.level` 省略时默认 `info`，只接受 `debug` / `info` / `warn` / `error`。每个客户端 Token 可以绑定一个或多个路由，建议按最小权限分配。
@@ -459,6 +475,7 @@ listeners:
 | `routes` | list | 必填 | 至少一个路由，名称不能重复 |
 | `routes[].name` | string | 必填 | 逻辑路由名，客户端通过 `X-Tunnel-Target` 引用 |
 | `routes[].type` | string | `tcp` | `tcp` = 服务端拨号 `target`；`stcp` = 不拨号，配对提供端与访问端，此时 `target` 必须留空 |
+| `routes[].bind` | string | 空 | 仅 stcp：服务端在此地址直接暴露路由，如 `127.0.0.1:1234`；按来源 IP 哈希分配提供端 |
 | `routes[].target` | string | tcp 必填 | TCP 目标，支持 `host:port` 或 `http(s)://host[:port]`（URL 仅取主机和端口，https 默认 443、http 默认 80） |
 | `routes[].use_proxy` | bool | `false` | 该路由是否走服务端全局出口代理；未勾选的路由直连目标 |
 | `proxy.enabled` | bool | `false` | 启用服务端出口代理，只影响 `routes[].use_proxy` 为 `true` 的路由 |
@@ -505,6 +522,7 @@ listeners:
 | `listeners[].strategy` | string | `round_robin` | `round_robin` 轮询 / `failover` 优先第一个，服务端不可用或数据流打不开时才用下一个 |
 | `providers` | list | 空 | stcp 提供端列表；把本机服务暴露到服务端 `type: stcp` 的路由 |
 | `providers[].route` | string | 必填 | 服务端路由名（必须是 stcp 类型） |
+| `providers[].use_proxy` | bool | `false` | 提供端拨号 `providers[].local` 时经过 `proxy`（需先 `proxy.enabled: true`）；用于本地服务只能经代理访问的场景，其他提供端仍直连 |
 | `providers[].local` | string | 必填 | 本机被暴露的 TCP 服务地址，如 `127.0.0.1:8080` |
 | `providers[].servers` | list | 空 | 在哪些服务端上维持提供流；留空 = 全部 |
 | `providers[].pool` | int | `2` | 每个服务端的空闲/并发提供流数量，最大 128 |

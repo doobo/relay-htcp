@@ -187,7 +187,7 @@ func (s *Server) handleXHTTPDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if kind == config.RouteTypeSTCP {
-		conn, err := s.stcp.pair(r.Context(), route, role, cfg.Tunnel.STCPTimeout)
+		conn, err := s.stcp.pair(r.Context(), route, role, entry.statsKey, cfg.Tunnel.STCPTimeout)
 		if err != nil {
 			if role == TunnelRoleProvider {
 				s.log.Debug("xhttp: stcp provider stream ended without a visitor", "route", route, "token", entry.name, "err", err)
