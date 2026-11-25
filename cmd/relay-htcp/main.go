@@ -79,14 +79,14 @@ func newLogger(level string) *slog.Logger {
 	switch level {
 	case "debug":
 		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
+	case "info":
+		lvl = slog.LevelInfo
 	case "error":
 		lvl = slog.LevelError
 	default:
-		lvl = slog.LevelInfo
+		lvl = slog.LevelWarn
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }
 
 // openAdmin opens the admin database, seeds the default user on first run,

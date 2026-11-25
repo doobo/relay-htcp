@@ -114,14 +114,14 @@ func TestTokenRoutes(t *testing.T) {
 	}
 }
 
-func TestLogLevelDefaultsToInfo(t *testing.T) {
+func TestLogLevelDefaultsToWarn(t *testing.T) {
 	cfg := minimalServerConfig()
 	cfg.Log.Level = ""
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Log.Level != "info" {
-		t.Fatalf("log level = %q, want info", cfg.Log.Level)
+	if cfg.Log.Level != "warn" {
+		t.Fatalf("log level = %q, want warn", cfg.Log.Level)
 	}
 
 	cfg.Log.Level = "verbose"

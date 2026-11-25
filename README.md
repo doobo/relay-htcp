@@ -2,6 +2,8 @@
 
 用 Go 实现的 **TCP over HTTP/2** 穿透工具：把任意 TCP 连接封装进标准 HTTPS/HTTP/2 流中，公网侧看起来是普通 Web 流量，同时提供 Token 认证、路由控制、连接池、心跳重连和内置 Web 管理面板。
 
+[English Documentation (README.en.md)](README.en.md)
+
 当前版本：`0.1.0`
 
 - 服务端部署在公网节点，暴露 HTTP(S) 端口。

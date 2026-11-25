@@ -389,7 +389,7 @@ func (c *ClientConfig) Validate() error {
 		c.Tunnel.StreamTimeout = 30 * time.Second
 	}
 	if c.Log.Level == "" {
-		c.Log.Level = "info"
+		c.Log.Level = "warn"
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

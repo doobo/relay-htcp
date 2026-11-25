@@ -1389,16 +1389,7 @@ function drawTokenDetail(data) {
     fmtBytes(r.bytes_out), fmtBytes((r.bytes_in || 0) + (r.bytes_out || 0)),
   ]);
   $("#token-detail-body").innerHTML = summary +
-    '<div id="token-traffic-chart" class="traffic-chart-container" style="margin-top:14px"></div>' +
     table(["日期", "路由", "入站", "出站", "合计"], rows);
-
-  // Render SVG chart for 14-day history (reverse so oldest is left, newest right)
-  const historyItems = (data.rows || []).slice().reverse().map((r) => ({
-    day: r.day,
-    bytes_in: r.bytes_in || 0,
-    bytes_out: r.bytes_out || 0,
-  }));
-  renderSVGBarChart($("#token-traffic-chart"), historyItems, "day", "bytes_in", "bytes_out", "入站", "出站");
 }
 
 /* ---------- ip access ---------- */

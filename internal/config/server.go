@@ -261,7 +261,7 @@ func (c *ServerConfig) Validate() error {
 	}
 	c.Tunnel.XHTTPPath = xhttpPath
 	if c.Log.Level == "" {
-		c.Log.Level = "info"
+		c.Log.Level = "warn"
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
