@@ -10,5 +10,8 @@
     root.setAttribute("data-theme", theme);
     root.setAttribute("data-theme-choice", choice);
     root.style.colorScheme = theme === "light" ? "light" : "dark";
+    if (sessionStorage.getItem("rhtcp_token")) {
+      root.classList.add("has-auth");
+    }
   } catch (e) { /* storage unavailable: keep the dark palette */ }
 })();

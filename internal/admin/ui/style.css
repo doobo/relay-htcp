@@ -147,6 +147,9 @@ code, kbd, pre { font-family: var(--mono); }
 .muted { color: var(--muted); }
 .error { color: var(--danger); min-height: 1.2em; margin: 8px 0 0; }
 
+/* When the user is already authenticated, keep login view hidden before JS runs */
+html.has-auth #login-view { display: none !important; }
+
 /* ---------------------------------------------------------------- login */
 
 .login-view {
@@ -925,6 +928,129 @@ dialog.dialog::backdrop {
 
 /* connection badge — visible only while the API is unreachable */
 .badge.conn { background: var(--danger-soft); color: var(--danger); }
+
+/* --------------------------------------------------- refresh & timestamp */
+
+.last-updated {
+  font-size: 11.5px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.auto-refresh-select {
+  padding: 3px 6px;
+  font-size: 11.5px;
+  height: 28px;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+}
+
+.refresh-btn .icon-refresh {
+  transition: transform 0.4s ease;
+}
+
+.refresh-btn.spinning .icon-refresh {
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  100% { transform: rotate(360deg); }
+}
+
+/* ---------------------------------------------------- svg traffic charts */
+
+.traffic-chart-container {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.traffic-chart-container.hidden { display: none; }
+
+.svg-chart-wrap {
+  position: relative;
+  width: 100%;
+  overflow-x: auto;
+}
+
+.svg-chart {
+  display: block;
+  min-width: 600px;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.svg-chart text {
+  font-family: inherit;
+  user-select: none;
+}
+
+.svg-chart text.chart-x-label {
+  font-size: 11px;
+}
+
+.svg-chart .chart-bar {
+  transition: opacity 120ms ease, transform 120ms ease;
+  cursor: pointer;
+}
+
+.svg-chart .chart-bar:hover {
+  opacity: 0.82;
+}
+
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--panel-alt);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+  z-index: 10;
+  white-space: nowrap;
+  transform: translate(-50%, -100%);
+  margin-top: -8px;
+  transition: opacity 100ms ease;
+}
+
+.chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-legend-color {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
 
 /* ---------------------------------------------------------- responsive */
 

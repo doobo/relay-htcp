@@ -12,7 +12,7 @@
 </head>
 <body>
 
-<div id="login-view" class="login-view">
+<div id="login-view" class="login-view hidden">
   <select class="theme-select" data-theme-select aria-label="主题" title="外观">
     <option value="auto">跟随系统</option>
     <option value="dark">深色</option>
@@ -46,6 +46,19 @@
       <button class="tab" data-tab="users" id="users-tab">用户</button>
     </nav>
     <div class="header-actions">
+      <span id="last-updated" class="last-updated muted" title="状态最后同步时间"></span>
+      <select id="auto-refresh-select" class="auto-refresh-select" aria-label="自动刷新频率" title="自动刷新频率">
+        <option value="0" selected>不自动刷新</option>
+        <option value="3000">3 秒</option>
+        <option value="5000">5 秒</option>
+        <option value="10000">10 秒</option>
+        <option value="30000">30 秒</option>
+      </select>
+      <button id="refresh-status-btn" type="button" class="secondary small refresh-btn" title="立即刷新状态" aria-label="立即刷新状态">
+        <svg class="icon-refresh" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M2.5 8a5.5 5.5 0 0 1 9.3-3.9L14 6m-12 0v-4m12 8a5.5 5.5 0 0 1-9.3 3.9L2 12m12 0v4"/>
+        </svg>
+      </button>
       <span id="conn-badge" class="badge conn hidden" title="与后端失去连接，正在自动重试">离线</span>
       <button id="restart-btn" type="button" class="danger small hidden"
         title="重新读取配置、重建隧道并重新绑定本地监听">重启</button>
@@ -79,6 +92,7 @@
           </select>
           <span class="muted" id="traffic-day"></span>
         </div>
+        <div id="traffic-chart" class="traffic-chart-container"></div>
         <div id="traffic-rows"></div>
       </div>
       <h2 id="live-title">实时连接</h2>

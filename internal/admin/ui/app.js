@@ -11,6 +11,7 @@ const state = {
   statusLoaded: false,
   pollBusy: false,
   pollFails: 0,
+  pollInterval: 0, // 0 = no auto refresh (default)
   lastStatusJSON: "",
   connected: true,
   visibilityBound: false,
@@ -196,6 +197,7 @@ function table(headers, rows) {
 
 function showLogin() {
   stopPolling();
+  document.documentElement.classList.remove("has-auth");
   $("#app-view").classList.add("hidden");
   $("#login-view").classList.remove("hidden");
   $("#login-error").textContent = "";
@@ -204,6 +206,7 @@ function showLogin() {
 }
 
 async function showApp() {
+  document.documentElement.classList.add("has-auth");
   $("#login-view").classList.add("hidden");
   $("#app-view").classList.remove("hidden");
   try {
@@ -220,6 +223,7 @@ async function showApp() {
     const canYAML = me.role === "admin";
     $("#cfg-mode-yaml").classList.toggle("hidden", !canYAML);
     if (!canYAML && state.configMode === "yaml") setConfigMode("form");
+    handleHashChange();
     startPolling();
   } catch (e) { /* showLogin already fired on 401 */ }
 }
@@ -386,23 +390,39 @@ async function restartClient() {
 
 /* ---------- tabs ---------- */
 
-function switchTab(name) {
+const VALID_TABS = ["status", "config", "tokens", "ip-access", "users"];
+
+function switchTab(name, updateHash = true) {
+  if (!VALID_TABS.includes(name)) name = "status";
   document.querySelectorAll(".tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll("main > section").forEach((s) =>
     s.classList.toggle("hidden", s.id !== "tab-" + name));
+  if (updateHash && window.location.hash !== "#" + name) {
+    history.replaceState(null, "", "#" + name);
+  }
   if (name === "config") loadConfig();
   if (name === "tokens") loadTokens();
   if (name === "ip-access") loadIPAccess();
   if (name === "users" && !state.usersLoaded) loadUsers();
 }
 
+function handleHashChange() {
+  const hash = window.location.hash.replace(/^#/, "");
+  if (hash && VALID_TABS.includes(hash)) {
+    // Check permission visibility
+    if (hash === "users" && state.role !== "admin") return;
+    if (hash === "ip-access" && state.role !== "admin") return;
+    switchTab(hash, false);
+  }
+}
+
 /* ---------- status ---------- */
 
-const POLL_BASE = 3000; // normal poll interval
+const POLL_BASE = 3000; // normal poll interval default
 const POLL_MAX = 15000; // backoff ceiling while the API is unreachable
 
-function startPolling() {
+function startPolling(immediate = true) {
   stopPolling();
   state.pollFails = 0;
   if (!state.visibilityBound) {
@@ -411,10 +431,14 @@ function startPolling() {
     document.addEventListener("visibilitychange", () => {
       if (!state.token) return;
       if (document.hidden) stopPolling();
-      else startPolling();
+      else if (state.pollInterval > 0) schedulePoll(state.pollInterval);
     });
   }
-  schedulePoll(0);
+  if (immediate) {
+    schedulePoll(0);
+  } else if (state.pollInterval > 0) {
+    schedulePoll(state.pollInterval);
+  }
 }
 
 function stopPolling() {
@@ -432,9 +456,11 @@ function schedulePoll(delay) {
 // Self-rescheduling poll: at most one request in flight (no pile-up when a
 // round trip takes longer than the interval), exponential back-off while the
 // API is down, and a visible offline badge instead of silent stale data.
-async function pollStatus() {
+async function pollStatus(isManual = false) {
   if (state.pollBusy) return;
   state.pollBusy = true;
+  const refreshBtn = $("#refresh-status-btn");
+  if (isManual && refreshBtn) refreshBtn.classList.add("spinning");
   let st = null;
   let ok = false;
   try {
@@ -442,17 +468,28 @@ async function pollStatus() {
     ok = true;
   } catch { /* handled below */ }
   state.pollBusy = false;
+  if (refreshBtn) refreshBtn.classList.remove("spinning");
 
   if (!ok) {
     state.pollFails += 1;
     setConnIndicator(false);
-    schedulePoll(Math.min(POLL_BASE << Math.min(state.pollFails, 4), POLL_MAX));
+    if (state.pollInterval > 0) {
+      schedulePoll(Math.min(Math.max(POLL_BASE, state.pollInterval) << Math.min(state.pollFails, 4), POLL_MAX));
+    }
     return;
   }
   state.pollFails = 0;
   setConnIndicator(true);
+  const now = new Date();
+  const timeStr = [now.getHours(), now.getMinutes(), now.getSeconds()]
+    .map((n) => String(n).padStart(2, "0")).join(":");
+  const lastUpdated = $("#last-updated");
+  if (lastUpdated) lastUpdated.textContent = "更新于 " + timeStr;
   renderStatus(st);
-  schedulePoll(POLL_BASE);
+
+  if (state.pollInterval > 0) {
+    schedulePoll(state.pollInterval);
+  }
 }
 
 function setConnIndicator(online) {
@@ -590,6 +627,115 @@ async function loadTraffic() {
   }
 }
 
+/* ---------- traffic charts (lightweight pure SVG) ---------- */
+
+function renderSVGBarChart(container, items, labelKey, value1Key, value2Key, label1, label2) {
+  if (!container) return;
+  if (!items || !items.length) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+  container.classList.remove("hidden");
+
+  // Determine max value for Y scale
+  let maxVal = 0;
+  items.forEach((item) => {
+    const v1 = Number(item[value1Key] || 0);
+    const v2 = Number(item[value2Key] || 0);
+    const sum = v1 + v2;
+    if (sum > maxVal) maxVal = sum;
+  });
+  if (maxVal === 0) maxVal = 1024; // fallback baseline
+
+  const n = items.length;
+  // Increase SVG bottom padding and overall height so rotated labels never clip
+  const width = Math.max(800, n * 50);
+  const height = 230;
+  const padLeft = 55;
+  const padRight = 30;
+  const padTop = 15;
+  const padBottom = 65;
+  const chartW = width - padLeft - padRight;
+  const chartH = height - padTop - padBottom;
+
+  const barGap = 8;
+  const groupW = chartW / n;
+  const barW = Math.max(6, Math.min(28, groupW - barGap));
+
+  // Grid lines (3 lines: 0, 50%, 100%)
+  const yLines = [0, 0.5, 1];
+  const gridSVG = yLines.map((ratio) => {
+    const y = padTop + chartH * (1 - ratio);
+    const valStr = fmtBytes(maxVal * ratio);
+    return '<line x1="' + padLeft + '" y1="' + y + '" x2="' + (width - padRight) + '" y2="' + y +
+      '" stroke="var(--border)" stroke-dasharray="3,3" stroke-width="1"/>' +
+      '<text x="' + (padLeft - 8) + '" y="' + (y + 3) +
+      '" fill="var(--muted)" font-size="10" text-anchor="end">' + esc(valStr) + '</text>';
+  }).join("");
+
+  // Bars and labels
+  const barsSVG = items.map((item, idx) => {
+    const v1 = Number(item[value1Key] || 0);
+    const v2 = Number(item[value2Key] || 0);
+    const total = v1 + v2;
+    const h1 = (v1 / maxVal) * chartH;
+    const h2 = (v2 / maxVal) * chartH;
+
+    const groupX = padLeft + idx * groupW + (groupW - barW) / 2;
+    const yBase = padTop + chartH;
+    const y1 = yBase - h1;
+    const y2 = y1 - h2;
+
+    const rawLabel = String(item[labelKey] || "");
+    const tooltipText = (item[labelKey] || "-") + " | " + label1 + ": " + fmtBytes(v1) + " | " + label2 + ": " + fmtBytes(v2) + " (合计: " + fmtBytes(total) + ")";
+    const labelX = groupX + barW / 2;
+    const labelY = yBase + 12;
+
+    return '<g class="chart-group" data-tip="' + esc(tooltipText) + '">' +
+      (h1 > 0 ? '<rect class="chart-bar" x="' + groupX + '" y="' + y1 + '" width="' + barW + '" height="' + h1 + '" fill="var(--accent)" rx="2"/>' : '') +
+      (h2 > 0 ? '<rect class="chart-bar" x="' + groupX + '" y="' + y2 + '" width="' + barW + '" height="' + h2 + '" fill="var(--ok)" rx="2"/>' : '') +
+      '<rect class="chart-hover-trigger" x="' + (padLeft + idx * groupW) + '" y="' + padTop + '" width="' + groupW + '" height="' + (chartH + 45) + '" fill="transparent"/>' +
+      '<text class="chart-x-label" x="' + labelX + '" y="' + labelY + '" fill="var(--muted)" font-size="11" text-anchor="end" transform="rotate(-30 ' + labelX + ' ' + labelY + ')">' + esc(rawLabel) + '</text>' +
+      '</g>';
+  }).join("");
+
+  container.innerHTML =
+    '<div class="svg-chart-wrap">' +
+      '<svg class="svg-chart" viewBox="0 0 ' + width + ' ' + height + '">' +
+        gridSVG +
+        barsSVG +
+      '</svg>' +
+      '<div class="chart-tooltip hidden" id="chart-tip"></div>' +
+      '<div class="chart-legend">' +
+        '<span class="chart-legend-item"><span class="chart-legend-color" style="background:var(--accent)"></span> ' + esc(label1) + '</span>' +
+        '<span class="chart-legend-item"><span class="chart-legend-color" style="background:var(--ok)"></span> ' + esc(label2) + '</span>' +
+      '</div>' +
+    '</div>';
+
+  const tip = container.querySelector("#chart-tip");
+  const wrap = container.querySelector(".svg-chart-wrap");
+  container.querySelectorAll(".chart-group").forEach((g) => {
+    g.addEventListener("mouseenter", (e) => {
+      const tipText = g.dataset.tip;
+      if (!tipText || !tip) return;
+      tip.textContent = tipText;
+      tip.classList.remove("hidden");
+    });
+    g.addEventListener("mousemove", (e) => {
+      if (!tip || !wrap) return;
+      const rect = wrap.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      tip.style.left = Math.max(30, Math.min(rect.width - 30, x)) + "px";
+      tip.style.top = y + "px";
+    });
+    g.addEventListener("mouseleave", () => {
+      if (tip) tip.classList.add("hidden");
+    });
+  });
+}
+
 function renderTraffic(data) {
   const isServer = data.filter_kind === "token";
   $("#traffic-day").textContent = data.day ? "统计日期 " + data.day : "";
@@ -614,6 +760,14 @@ function renderTraffic(data) {
     ? ["日期", "Token", "路由", "入站", "出站", "合计"]
     : ["日期", "服务端", "路由", "入站", "出站", "合计"];
   $("#traffic-rows").innerHTML = table(headers, rows);
+
+  // Render SVG chart for daily traffic
+  const chartItems = (data.rows || []).map((r) => ({
+    name: isServer ? (labels[r.token] || r.token || "-") : (r.server || "-"),
+    bytes_in: r.bytes_in || 0,
+    bytes_out: r.bytes_out || 0,
+  }));
+  renderSVGBarChart($("#traffic-chart"), chartItems, "name", "bytes_in", "bytes_out", "入站", "出站");
 }
 
 /* ---------- config ---------- */
@@ -1235,7 +1389,16 @@ function drawTokenDetail(data) {
     fmtBytes(r.bytes_out), fmtBytes((r.bytes_in || 0) + (r.bytes_out || 0)),
   ]);
   $("#token-detail-body").innerHTML = summary +
+    '<div id="token-traffic-chart" class="traffic-chart-container" style="margin-top:14px"></div>' +
     table(["日期", "路由", "入站", "出站", "合计"], rows);
+
+  // Render SVG chart for 14-day history (reverse so oldest is left, newest right)
+  const historyItems = (data.rows || []).slice().reverse().map((r) => ({
+    day: r.day,
+    bytes_in: r.bytes_in || 0,
+    bytes_out: r.bytes_out || 0,
+  }));
+  renderSVGBarChart($("#token-traffic-chart"), historyItems, "day", "bytes_in", "bytes_out", "入站", "出站");
 }
 
 /* ---------- ip access ---------- */
@@ -1526,6 +1689,14 @@ $("#traffic-filter").addEventListener("change", () => {
 $("#ip-form").addEventListener("submit", saveIPAccess);
 $("#ip-reload").addEventListener("click", loadIPAccess);
 $("#user-form").addEventListener("submit", createUser);
+$("#refresh-status-btn")?.addEventListener("click", () => pollStatus(true));
+$("#auto-refresh-select")?.addEventListener("change", (e) => {
+  const interval = parseInt(e.target.value, 10) || 0;
+  state.pollInterval = interval;
+  stopPolling();
+  if (interval > 0) schedulePoll(interval);
+});
+window.addEventListener("hashchange", handleHashChange);
 document.querySelectorAll(".tab").forEach((b) =>
   b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $("#users-table").addEventListener("click", (e) => {
